@@ -1,3338 +1,1069 @@
-import { createSHA256 } from './vendor/hash-wasm/index.esm.js';
+import { checksum } from './checksum.js';
 
 const dom = {
-  displayName: document.getElementById('displayName'),
   currentDisplayName: document.getElementById('currentDisplayName'),
-  saveDisplayName: document.getElementById('saveDisplayName'),
-  selfId: document.getElementById('selfId'),
+  pinButton: document.getElementById('pinButton'),
+  pinValue: document.getElementById('pinValue'),
+  pinDialog: document.getElementById('pinDialog'),
+  pinInput: document.getElementById('pinInput'),
   peerList: document.getElementById('peerList'),
-  peerTemplate: document.getElementById('peerTemplate'),
-  fileTarget: document.getElementById('fileTarget'),
+  emptyPeers: document.getElementById('emptyPeers'),
+  mdnsAddress: document.getElementById('mdnsAddress'),
+  ipAddress: document.getElementById('ipAddress'),
+  qrToggle: document.getElementById('qrToggle'),
+  addressQr: document.getElementById('addressQr'),
+  qrLabel: document.getElementById('qrLabel'),
   fileInput: document.getElementById('fileInput'),
-  sendFileBtn: document.getElementById('sendFileBtn'),
-  fileStatus: document.getElementById('fileStatus'),
+  fileList: document.getElementById('fileList'),
   clipboardText: document.getElementById('clipboardText'),
-  clipboardTarget: document.getElementById('clipboardTarget'),
-  pushClipboardBtn: document.getElementById('pushClipboardBtn'),
-  readAndBroadcastClipboardBtn: document.getElementById('readAndBroadcastClipboardBtn'),
+  clipboardState: document.getElementById('clipboardState'),
+  readClipboardBtn: document.getElementById('readClipboardBtn'),
   copyClipboardBtn: document.getElementById('copyClipboardBtn'),
-  clipboardStatus: document.getElementById('clipboardStatus'),
-  chatForm: document.getElementById('chatForm'),
-  chatTarget: document.getElementById('chatTarget'),
-  chatInput: document.getElementById('chatInput'),
-  messages: document.getElementById('messages'),
-  activityLog: document.getElementById('activityLog'),
-  statusServer: document.getElementById('statusServer'),
-  clipboardOverlay: document.getElementById('clipboardOverlay'),
-  clipboardOverlayArea: document.getElementById('clipboardOverlayArea'),
-  clipboardOverlayConfirm: document.getElementById('clipboardOverlayConfirm'),
-  clipboardOverlayCancel: document.getElementById('clipboardOverlayCancel'),
-  clipboardOverlayMessage: document.getElementById('clipboardOverlayMessage'),
-  clipboardOverlayPreview: document.getElementById('clipboardOverlayPreview'),
-  clipboardOverlayTitle: document.getElementById('clipboardOverlayTitle'),
-  directSaveOverlay: document.getElementById('directSaveOverlay'),
-  directSaveTitle: document.getElementById('directSaveTitle'),
-  directSaveMessage: document.getElementById('directSaveMessage'),
-  directSaveMeta: document.getElementById('directSaveMeta'),
-  directSaveConfirm: document.getElementById('directSaveConfirm'),
-  directSaveTemp: document.getElementById('directSaveTemp'),
-  directSaveCancel: document.getElementById('directSaveCancel'),
+  themeToggle: document.getElementById('themeToggle'),
+  themeIcon: document.getElementById('themeIcon'),
+  transferModal: document.getElementById('transferModal'),
+  transferTitle: document.getElementById('transferTitle'),
+  transferTotalText: document.getElementById('transferTotalText'),
+  transferTotalProgress: document.getElementById('transferTotalProgress'),
+  transferFileName: document.getElementById('transferFileName'),
+  transferFileSize: document.getElementById('transferFileSize'),
+  transferFileProgress: document.getElementById('transferFileProgress'),
+  toast: document.getElementById('toast'),
 };
 
-const statusPanels = Array.from(document.querySelectorAll('.status-panel'));
+const FILE_CHUNK_SIZE = 256 * 1024;
+const RTC_CONNECT_TIMEOUT = 3500;
+const RTC_BUFFER_LIMIT = 1024 * 1024;
+const SIGNALING_URL = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`;
+const CLIENT_TOKEN_PREFIX = 'landu:';
+const adjectives = ['Nice', 'Cute', 'Fantastic', 'Brave', 'Gentle', 'Swift'];
+const nouns = ['Avocado', 'Blueberry', 'Lemon', 'Mango', 'Coconut', 'Peach'];
 
-const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
-const FILE_CHUNK_SIZE = 64 * 1024;
-const DIRECT_FILE_CHUNK_SIZE = 256 * 1024;
-const DIRECT_MEMORY_LIMIT = 256 * 1024 * 1024;
-const DIRECT_CONNECT_TIMEOUT = 8000;
-const DIRECT_CONTROL_TIMEOUT = 15000;
-const DIRECT_CHUNK_ACK_TIMEOUT = 30000;
-const HTTP_FILE_CHUNK_SIZE = 4 * 1024 * 1024;
-const WS_RECONNECT_BASE_DELAY = 1500;
-const WS_RECONNECT_MAX_DELAY = 15000;
-const SHORT_HASH_LENGTH = 12;
-
-const state = {
-  selfId: null,
-  displayName: '',
-  peers: new Map(),
-  peerConnections: new Map(),
-  incomingTransfers: new Map(),
-  outgoingTransfers: new Map(),
-  orphanCandidates: new Map(),
-  transferTrackers: new Map(),
-  hasSentInitialRegister: false,
-  ws: null,
-  wsReconnectTimer: null,
-  wsReconnectAttempts: 0,
-  lastClipboardPayload: null,
-  clipboardTextLinkedPayload: null,
-  directControlWaiters: new Map(),
-  directChunkAckWaiters: new Map(),
-};
-
-const peerLabel = (peerId) => state.peers.get(peerId)?.displayName || peerId;
-
-const deferred = () => {
-  let settled = false;
-  let resolve;
-  let reject;
-  const promise = new Promise((res, rej) => {
-    resolve = (value) => {
-      if (!settled) {
-        settled = true;
-        res(value);
-      }
-    };
-    reject = (reason) => {
-      if (!settled) {
-        settled = true;
-        rej(reason);
-      }
-    };
-  });
-  return { promise, resolve, reject };
-};
-
-const ACTIVITY_LIMIT = 200;
-const ACTIVITY_LABELS = {
-  outbound: '发送',
-  inbound: '接收',
-  status: '状态',
-  warning: '提醒',
-  error: '错误',
-};
-const SILENCED_OUTBOUND_TYPES = new Set(['pong', 'file-transfer-chunk']);
-const SILENCED_INBOUND_TYPES = new Set(['pong', 'ping', 'file-transfer-chunk', 'large-file-progress']);
-
-const truncate = (text, length = 80) => {
-  if (typeof text !== 'string') return '';
-  if (text.length <= length) return text;
-  return `${text.slice(0, length)}…`;
-};
-
-const formatClock = () => new Date().toLocaleTimeString('zh-CN', { hour12: false });
-
-const humanFileSize = (bytes) => {
-  if (!Number.isFinite(bytes) || bytes < 0) return '';
-  if (bytes === 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let size = bytes;
-  let unitIndex = 0;
-  while (size >= 1024 && unitIndex < units.length - 1) {
-    size /= 1024;
-    unitIndex += 1;
+const randomId = () => {
+  const webCrypto = globalThis.crypto;
+  if (webCrypto?.randomUUID) return webCrypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  if (webCrypto?.getRandomValues) {
+    webCrypto.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) bytes[index] = Math.floor(Math.random() * 256);
   }
-  const precision = size >= 10 || unitIndex === 0 ? 0 : 1;
-  return `${size.toFixed(precision)} ${units[unitIndex]}`;
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, '0'));
+  return `${hex.slice(0, 4).join('')}-${hex.slice(4, 6).join('')}-${hex.slice(6, 8).join('')}-${hex.slice(8, 10).join('')}-${hex.slice(10).join('')}`;
 };
 
-const withTimeout = (promise, ms, errorMessage) =>
-  new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(errorMessage instanceof Error ? errorMessage : new Error(errorMessage));
-    }, ms);
-    promise
-      .then((value) => {
-        clearTimeout(timer);
-        resolve(value);
-      })
-      .catch((error) => {
-        clearTimeout(timer);
-        reject(error);
-      });
-  });
+const randomName = () =>
+  `${adjectives[Math.floor(Math.random() * adjectives.length)]} ${
+    nouns[Math.floor(Math.random() * nouns.length)]
+  }`;
 
-const readJsonResponse = async (response) => {
-  let payload = null;
+const loadName = () => {
   try {
-    payload = await response.json();
+    const existing = localStorage.getItem('landu:displayName');
+    if (existing) return existing;
+    const name = randomName();
+    localStorage.setItem('landu:displayName', name);
+    return name;
   } catch {
-    payload = null;
+    return randomName();
   }
-  if (!response.ok) {
-    throw new Error(payload?.error || payload?.message || `请求失败：${response.status}`);
+};
+
+const loadToken = () => {
+  try {
+    const existing = localStorage.getItem('landu:token');
+    if (existing?.startsWith(CLIENT_TOKEN_PREFIX)) return existing;
+    const token = `${CLIENT_TOKEN_PREFIX}${randomId()}`;
+    localStorage.setItem('landu:token', token);
+    return token;
+  } catch {
+    return `${CLIENT_TOKEN_PREFIX}${randomId()}`;
   }
-  return payload || {};
 };
 
-const createSha256 = async () => {
-  const hasher = await createSHA256();
-  hasher.init();
-  return hasher;
-};
-
-const hashBytes = async (hasher, bytes) => {
-  hasher.init();
-  hasher.update(bytes);
-  return hasher.digest('hex');
-};
-
-const shortHash = (value) =>
-  typeof value === 'string' && value
-    ? `${value.slice(0, SHORT_HASH_LENGTH)}…`
-    : '未知';
-
-const dataChannelKey = (peerId) => `dc:${peerId}`;
-const relayKey = (transferId) => `relay:${transferId}`;
-const directKey = (transferId) => `direct:${transferId}`;
-const directAckKey = (transferId, index) => `${transferId}:${index}`;
-
-const createFallbackError = (message) => {
-  const error = new Error(message);
-  error.fallbackToRelay = true;
-  return error;
-};
-
-const supportsOriginPrivateFileSystem = () =>
-  Boolean(navigator.storage && typeof navigator.storage.getDirectory === 'function');
-
-const supportsDirectSaveToDisk = () =>
-  typeof window.showSaveFilePicker === 'function' &&
-  typeof WritableStream !== 'undefined';
-
-const bufferToBase64 = (buffer) => {
-  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
-  const chunkSize = 0x8000;
-  let binary = '';
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    const chunk = bytes.subarray(i, i + chunkSize);
-    binary += String.fromCharCode(...chunk);
-  }
-  return btoa(binary);
-};
-
-const base64ToUint8Array = (base64) => {
-  const binary = atob(base64);
-  const len = binary.length;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
-};
-
-const friendlyMimeLabel = (mime) => {
-  if (!mime || typeof mime !== 'string') return '未知格式';
-  if (mime === 'text/plain') return '纯文本';
-  if (mime === 'text/html') return 'HTML';
-  if (mime === 'text/rtf') return 'RTF';
-  if (mime === 'text/uri-list') return '链接列表';
-  if (mime.startsWith('image/')) {
-    const subtype = mime.split('/')[1] || '';
-    return `图像(${subtype.toUpperCase() || mime})`;
-  }
-  if (mime.startsWith('application/')) {
-    return mime.split('/')[1]?.toUpperCase() || mime;
-  }
-  return mime;
-};
-
-const clipboardFormatHint = (descriptor) => {
-  const items = Array.isArray(descriptor?.items) ? descriptor.items : [];
-  if (!items.length) return '';
-  const uniqueMimes = [...new Set(items.map((entry) => entry.mime).filter(Boolean))];
-  if (!uniqueMimes.length) return '';
-  const preview = uniqueMimes.slice(0, 3).map(friendlyMimeLabel).join('、');
-  const suffix = uniqueMimes.length > 3 ? '等' : '';
-  return `（含 ${uniqueMimes.length} 种格式：${preview}${suffix}）`;
-};
-
-const hasClipboardData = (descriptor) => {
-  if (!descriptor) return false;
-  const hasText = typeof descriptor.content === 'string' && descriptor.content.length > 0;
-  const hasItems = Array.isArray(descriptor.items) && descriptor.items.length > 0;
-  return hasText || hasItems;
-};
-
-const serializeClipboardItems = async (clipboardItems) => {
-  const serialized = [];
-  const items = Array.from(clipboardItems || []);
-  const seenTypes = new Set();
-  for (const item of items) {
-    if (!item?.types) continue;
-    for (const type of item.types) {
-      if (!type || seenTypes.has(type)) continue;
-      try {
-        const blob = await item.getType(type);
-        if (type.startsWith('text/') || type === 'application/json') {
-          const text = await blob.text();
-          serialized.push({ mime: type, encoding: 'text', data: text });
-        } else {
-          const buffer = await blob.arrayBuffer();
-          serialized.push({ mime: type, encoding: 'base64', data: bufferToBase64(buffer) });
-        }
-        seenTypes.add(type);
-      } catch (error) {
-        console.warn('Failed to read clipboard item', type, error);
-      }
-    }
-  }
-  return serialized;
-};
-
-const extractPlainText = (descriptor, fallback = '') => {
-  if (!descriptor) return fallback;
-  if (typeof descriptor.content === 'string') return descriptor.content;
-  if (Array.isArray(descriptor.items)) {
-    const plainEntry = descriptor.items.find((entry) => entry.mime === 'text/plain');
-    if (typeof plainEntry?.data === 'string') return plainEntry.data;
-    const genericText = descriptor.items.find((entry) => entry.mime?.startsWith('text/'));
-    if (typeof genericText?.data === 'string') return genericText.data;
-  }
-  return fallback;
-};
-
-const descriptorHasHtml = (descriptor) =>
-  Array.isArray(descriptor?.items) &&
-  descriptor.items.some((entry) => entry && entry.mime === 'text/html' && typeof entry.data === 'string');
-
-const getDescriptorHtml = (descriptor) => {
-  if (!Array.isArray(descriptor?.items)) return '';
-  const entry = descriptor.items.find((item) => item && item.mime === 'text/html');
-  if (!entry) return '';
-  if (entry.encoding && entry.encoding !== 'text') {
+const loadPin = () => {
+  try {
+    return localStorage.getItem('landu:pin') || '';
+  } catch {
     return '';
   }
-  return typeof entry.data === 'string' ? entry.data : '';
 };
 
-const readClipboardWithExecCommand = () => {
-  if (typeof document.execCommand !== 'function') {
-    return null;
-  }
-
-  const selection = document.getSelection();
-  const previousRanges = [];
-  if (selection && selection.rangeCount) {
-    for (let i = 0; i < selection.rangeCount; i += 1) {
-      previousRanges.push(selection.getRangeAt(i));
-    }
-  }
-
-  const activeElement = document.activeElement;
-
-  const container = document.createElement('div');
-  container.contentEditable = 'true';
-  container.style.position = 'fixed';
-  container.style.left = '-9999px';
-  container.style.bottom = '0';
-  container.style.pointerEvents = 'none';
-  container.style.opacity = '0';
-  container.style.whiteSpace = 'pre-wrap';
-  document.body.appendChild(container);
-
-  container.focus();
-
-  let success = false;
+const loadTheme = () => {
   try {
-    success = document.execCommand('paste');
+    return localStorage.getItem('landu:theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
   } catch {
-    success = false;
-  }
-
-  const html = container.innerHTML;
-  const text = container.textContent || '';
-
-  if (selection) {
-    selection.removeAllRanges();
-    previousRanges.forEach((range) => selection.addRange(range));
-  }
-
-  if (activeElement && typeof activeElement.focus === 'function') {
-    activeElement.focus();
-  }
-
-  container.remove();
-
-  if (!success) {
-    return null;
-  }
-
-  const items = [];
-  if (html) {
-    items.push({ mime: 'text/html', encoding: 'text', data: html });
-  }
-  if (text) {
-    items.push({ mime: 'text/plain', encoding: 'text', data: text });
-  }
-
-  return {
-    content: text,
-    items,
-  };
-};
-
-const descriptorFromClipboardData = (clipboardData) => {
-  if (!clipboardData) return null;
-  const entries = new Map();
-  const store = (mime, data) => {
-    if (typeof data !== 'string' || !data) return;
-    entries.set(mime, { mime, encoding: 'text', data });
-  };
-
-  const hasGetData = typeof clipboardData.getData === 'function';
-  const knownTypes = hasGetData ? Array.from(clipboardData.types || []) : [];
-  if (hasGetData) {
-    if (knownTypes.includes('text/html') || knownTypes.includes('text/HTML')) {
-      store('text/html', clipboardData.getData('text/html') || clipboardData.getData('text/HTML'));
-    }
-    if (knownTypes.includes('text/rtf')) {
-      store('text/rtf', clipboardData.getData('text/rtf'));
-    }
-    if (knownTypes.includes('text/uri-list')) {
-      store('text/uri-list', clipboardData.getData('text/uri-list'));
-    }
-    store('text/plain', clipboardData.getData('text/plain'));
-  }
-
-  const items = Array.from(entries.values());
-  const content = entries.get('text/plain')?.data || extractPlainText({ items }, '');
-  const descriptor = { content: content || '' };
-  if (items.length) {
-    descriptor.items = items;
-  }
-  return descriptor;
-};
-
-const descriptorFormatLabels = (descriptor) => {
-  if (!descriptor) return [];
-  const formats = new Set();
-  if (Array.isArray(descriptor.items)) {
-    descriptor.items.forEach((entry) => {
-      if (entry?.mime) {
-        formats.add(friendlyMimeLabel(entry.mime));
-      }
-    });
-  }
-  if (typeof descriptor.content === 'string' && descriptor.content.length > 0) {
-    formats.add(friendlyMimeLabel('text/plain'));
-  }
-  return Array.from(formats);
-};
-
-const descriptorFormatSummary = (descriptor) => {
-  const formats = descriptorFormatLabels(descriptor);
-  if (!formats.length) {
-    return '尚未粘贴内容。';
-  }
-  return `捕获格式：${formats.join('、')}`;
-};
-
-const overlayState = {
-  active: false,
-  descriptor: null,
-  resolve: null,
-  restoreFocus: null,
-  cleanup: null,
-};
-
-const closeClipboardOverlay = (result) => {
-  if (!dom.clipboardOverlay) return;
-  if (typeof overlayState.cleanup === 'function') {
-    overlayState.cleanup();
-  }
-  dom.clipboardOverlay.hidden = true;
-  dom.clipboardOverlayArea?.removeAttribute('data-overlay-listening');
-  dom.clipboardOverlayArea?.replaceChildren();
-  if (dom.clipboardOverlayPreview) {
-    dom.clipboardOverlayPreview.textContent = '';
-  }
-  if (overlayState.restoreFocus && typeof overlayState.restoreFocus.focus === 'function') {
-    overlayState.restoreFocus.focus();
-  }
-  const resolver = overlayState.resolve;
-  overlayState.active = false;
-  overlayState.descriptor = null;
-  overlayState.resolve = null;
-  overlayState.restoreFocus = null;
-  overlayState.cleanup = null;
-  if (resolver) {
-    resolver(result || null);
+    return 'light';
   }
 };
 
-const openClipboardOverlay = (options = {}) => {
-  if (!dom.clipboardOverlay || !dom.clipboardOverlayArea) {
-    return Promise.resolve(null);
-  }
-  if (overlayState.active) {
-    closeClipboardOverlay(null);
-  }
-  return new Promise((resolve) => {
-    overlayState.active = true;
-    overlayState.resolve = resolve;
-    overlayState.descriptor = null;
-    overlayState.restoreFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-
-    const {
-      title = '粘贴剪贴板内容',
-      message = '浏览器阻止直接读取剪贴板，请在下方区域按 Ctrl+V / ⌘V 粘贴内容。',
-      confirmLabel = '确定',
-    } = options;
-
-    if (dom.clipboardOverlayTitle) {
-      dom.clipboardOverlayTitle.textContent = title;
-    }
-    if (dom.clipboardOverlayMessage) {
-      dom.clipboardOverlayMessage.textContent = message;
-    }
-    if (dom.clipboardOverlayConfirm) {
-      dom.clipboardOverlayConfirm.textContent = confirmLabel;
-    }
-    if (dom.clipboardOverlayPreview) {
-      dom.clipboardOverlayPreview.textContent = '尚未粘贴内容。';
-    }
-
-    dom.clipboardOverlay.hidden = false;
-    dom.clipboardOverlayArea.innerHTML = '';
-    const area = dom.clipboardOverlayArea;
-    area.setAttribute('data-overlay-listening', 'true');
-
-    const updatePreview = () => {
-      if (!dom.clipboardOverlayPreview) return;
-      dom.clipboardOverlayPreview.textContent = descriptorFormatSummary(overlayState.descriptor);
-    };
-
-    const handlePaste = (event) => {
-      event.preventDefault();
-      const descriptor = descriptorFromClipboardData(event.clipboardData);
-      overlayState.descriptor = descriptor;
-      const html = descriptorHasHtml(descriptor) ? getDescriptorHtml(descriptor) : '';
-      if (html) {
-        area.innerHTML = html;
-      } else if (typeof descriptor?.content === 'string') {
-        area.textContent = descriptor.content;
-      } else {
-        area.textContent = '';
-      }
-      updatePreview();
-    };
-
-    const handleInput = () => {
-      overlayState.descriptor = null;
-      updatePreview();
-    };
-
-    const handleConfirm = () => {
-      let descriptor = overlayState.descriptor;
-      if (!hasClipboardData(descriptor)) {
-        const manualText = area.innerText || area.textContent || '';
-        if (manualText.trim()) {
-          descriptor = { content: manualText };
-        }
-      }
-      closeClipboardOverlay(hasClipboardData(descriptor) ? normalizeClipboardDescriptor(descriptor) : null);
-    };
-
-    const handleCancel = () => {
-      closeClipboardOverlay(null);
-    };
-
-    const handleKeydown = (event) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        handleCancel();
-      } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-        event.preventDefault();
-        handleConfirm();
-      }
-    };
-
-    const detach = () => {
-      area.removeEventListener('paste', handlePaste);
-      area.removeEventListener('input', handleInput);
-      dom.clipboardOverlayConfirm?.removeEventListener('click', handleConfirm);
-      dom.clipboardOverlayCancel?.removeEventListener('click', handleCancel);
-      dom.clipboardOverlay?.removeEventListener('keydown', handleKeydown, true);
-    };
-
-    area.addEventListener('paste', handlePaste);
-    area.addEventListener('input', handleInput);
-    dom.clipboardOverlayConfirm?.addEventListener('click', handleConfirm);
-    dom.clipboardOverlayCancel?.addEventListener('click', handleCancel);
-    dom.clipboardOverlay?.addEventListener('keydown', handleKeydown, true);
-
-    overlayState.cleanup = detach;
-
-    setTimeout(() => {
-      area.focus();
-      updatePreview();
-    }, 0);
-  });
-};
-
-const readSystemClipboardDescriptor = async () => {
-  if (!navigator.clipboard) {
-    const commandDescriptor = readClipboardWithExecCommand();
-    if (commandDescriptor) {
-      return { descriptor: commandDescriptor, mode: 'command' };
-    }
-    throw new Error('当前环境不支持剪贴板 API。');
-  }
-  let richError = null;
-  if (
-    typeof navigator.clipboard.read === 'function' &&
-    typeof ClipboardItem !== 'undefined'
-  ) {
-    try {
-      const items = await navigator.clipboard.read();
-      const serialized = await serializeClipboardItems(items);
-      const descriptor = {
-        content: extractPlainText({ items: serialized }, ''),
-        items: serialized,
-      };
-      return { descriptor: normalizeClipboardDescriptor(descriptor), mode: 'rich' };
-    } catch (error) {
-      richError = error;
-    }
-  }
-  const commandDescriptor = readClipboardWithExecCommand();
-  if (commandDescriptor) {
-    return { descriptor: normalizeClipboardDescriptor(commandDescriptor), mode: 'command' };
-  }
-  if (typeof navigator.clipboard.readText === 'function') {
-    try {
-      const text = await navigator.clipboard.readText();
-      return { descriptor: normalizeClipboardDescriptor({ content: text || '' }), mode: 'text' };
-    } catch (error) {
-      if (!richError) richError = error;
-    }
-  }
-  if (dom.clipboardOverlay) {
-    const manualDescriptor = await openClipboardOverlay({
-      message: '浏览器阻止直接读取剪贴板，请在下方区域按 Ctrl+V / ⌘V 粘贴内容，我们会保留原始格式。',
-      confirmLabel: '使用此内容',
-    });
-    if (manualDescriptor && hasClipboardData(manualDescriptor)) {
-      return { descriptor: normalizeClipboardDescriptor(manualDescriptor), mode: 'manual' };
-    }
-  }
-  if (richError) throw richError;
-  return { descriptor: null, mode: 'unsupported' };
-};
-
-const writeClipboardData = async (descriptor, options = {}) => {
-  const { allowTextFallback = true } = options;
-  if (!navigator.clipboard) {
-    throw new Error('当前环境不支持剪贴板写入。');
-  }
-  if (
-    descriptor &&
-    Array.isArray(descriptor.items) &&
-    descriptor.items.length > 0 &&
-    typeof navigator.clipboard.write === 'function' &&
-    typeof ClipboardItem !== 'undefined'
-  ) {
-    const itemEntries = {};
-    let hasBlob = false;
-    for (const entry of descriptor.items) {
-      if (!entry?.mime || !entry?.data) continue;
-      try {
-        if (entry.encoding === 'base64') {
-          const bytes = base64ToUint8Array(entry.data);
-          itemEntries[entry.mime] = new Blob([bytes], { type: entry.mime });
-        } else {
-          itemEntries[entry.mime] = new Blob([entry.data], { type: entry.mime });
-        }
-        hasBlob = true;
-      } catch (error) {
-        console.warn('Failed to reconstruct clipboard item', entry.mime, error);
-      }
-    }
-    if (
-      typeof descriptor.content === 'string' &&
-      descriptor.content &&
-      !itemEntries['text/plain']
-    ) {
-      itemEntries['text/plain'] = new Blob([descriptor.content], { type: 'text/plain' });
-      hasBlob = true;
-    }
-    if (hasBlob) {
-      try {
-        await navigator.clipboard.write([new ClipboardItem(itemEntries)]);
-        return { mode: 'rich', fallback: false };
-      } catch (error) {
-        if (!allowTextFallback) {
-          throw error;
-        }
-        if (typeof descriptor.content !== 'string' || typeof navigator.clipboard.writeText !== 'function') {
-          throw error;
-        }
-        await navigator.clipboard.writeText(descriptor.content);
-        return { mode: 'text', fallback: true };
-      }
-    }
-  }
-  const text =
-    typeof descriptor === 'string'
-      ? descriptor
-      : typeof descriptor?.content === 'string'
-      ? descriptor.content
-      : '';
-  if (typeof navigator.clipboard.writeText !== 'function') {
-    throw new Error('此浏览器不支持写入纯文本剪贴板。');
-  }
-  if (!allowTextFallback) {
-    throw new Error('此浏览器不支持写入纯文本剪贴板。');
-  }
-  if (!text) {
-    throw new Error('剪贴板内容为空或无法转换为纯文本。');
-  }
-  await navigator.clipboard.writeText(text);
-  return { mode: 'text', fallback: false };
-};
-
-const normalizeClipboardDescriptor = (descriptor) => {
-  if (!descriptor || typeof descriptor !== 'object') {
-    return {};
-  }
-  const result = {};
-  if (typeof descriptor.content === 'string') {
-    result.content = descriptor.content;
-  }
-  if (Array.isArray(descriptor.items)) {
-    const items = descriptor.items
-      .filter((entry) => entry && typeof entry.mime === 'string' && typeof entry.data === 'string')
-      .map((entry) => ({
-        mime: entry.mime,
-        data: entry.data,
-        encoding: entry.encoding === 'base64' ? 'base64' : 'text',
-      }));
-    if (items.length) {
-      result.items = items;
-    }
-  }
-  return result;
-};
-
-const microDelay = () => new Promise((resolve) => setTimeout(resolve, 0));
-
-const updateStatusPanelScroll = (container) => {
-  const panel = container ? container.closest('.status-panel') : null;
-  if (!container) return;
-  if (panel) {
-    if (panel.open) {
-      container.scrollTop = container.scrollHeight;
-      panel.classList.remove('has-updates');
-    } else {
-      panel.classList.add('has-updates');
-    }
-  } else {
-    container.scrollTop = container.scrollHeight;
-  }
-};
-
-const createTransferDisplay = ({ direction, peerId, name, size }) => {
-  if (!dom.fileStatus) return null;
-  const entry = document.createElement('div');
-  entry.className = `transfer-entry transfer-${direction}`;
-
-  const heading = document.createElement('div');
-  heading.className = 'transfer-heading';
-  heading.textContent =
-    direction === 'outbound'
-      ? `发送到 ${peerLabel(peerId)}`
-      : `来自 ${peerLabel(peerId)}`;
-
-  const filename = document.createElement('div');
-  filename.className = 'transfer-filename';
-  filename.textContent = name || '未命名文件';
-
-  const meta = document.createElement('div');
-  meta.className = 'transfer-meta';
-  meta.textContent = humanFileSize(size);
-
-  const progress = document.createElement('progress');
-  progress.max = 100;
-  progress.value = 0;
-
-  const status = document.createElement('div');
-  status.className = 'transfer-status-line';
-  status.textContent = direction === 'outbound' ? '正在建立连接…' : '等待数据…';
-
-  entry.append(heading, filename, meta, progress, status);
-  dom.fileStatus.appendChild(entry);
-  updateStatusPanelScroll(dom.fileStatus);
-  return {
-    entry,
-    progress,
-    status,
-    meta,
-    heading,
-    filename,
-  };
-};
-
-const updateTransferDisplay = (display, { percent, status }) => {
-  if (!display) return;
-  if (typeof percent === 'number' && !Number.isNaN(percent)) {
-    display.progress.value = Math.max(0, Math.min(100, percent));
-  }
-  if (status) {
-    display.status.textContent = status;
-  }
-};
-
-const completeTransferDisplay = (display, message) => {
-  if (!display) return;
-  display.entry.classList.add('transfer-complete');
-  display.progress.value = 100;
-  if (message) {
-    display.status.textContent = message;
-  }
-};
-
-const failTransferDisplay = (display, message) => {
-  if (!display) return;
-  display.entry.classList.add('transfer-error');
-  if (message) {
-    display.status.textContent = message;
-  }
-};
-
-const triggerDownload = (blob, filename) => {
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = filename || '接收文件';
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  return url;
-};
-
-const triggerDownloadUrl = (url, filename) => {
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = filename || '接收文件';
-  link.rel = 'noopener';
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-};
-
-const supportsVerifiedStreamingDownload = () =>
-  typeof window.showSaveFilePicker === 'function' &&
-  typeof ReadableStream !== 'undefined' &&
-  typeof WritableStream !== 'undefined';
-
-const downloadWithVerification = async (payload, display) => {
-  if (!supportsVerifiedStreamingDownload()) {
-    throw new Error('当前浏览器不支持流式校验保存。');
-  }
-
-  const filename = payload.name || '接收文件';
-  let fileHandle;
+const applyTheme = (theme) => {
+  const nextTheme = theme === 'dark' ? 'dark' : 'light';
+  document.documentElement.dataset.theme = nextTheme;
+  dom.themeIcon.textContent = nextTheme === 'dark' ? 'light_mode' : 'dark_mode';
+  dom.themeToggle.setAttribute('aria-label', nextTheme === 'dark' ? '切换浅色模式' : '切换深色模式');
   try {
-    fileHandle = await window.showSaveFilePicker({
-      suggestedName: filename,
-    });
-  } catch (error) {
-    if (error?.name === 'AbortError') {
-      updateTransferDisplay(display, {
-        status: '已取消选择保存位置。',
-      });
-      return;
-    }
-    throw error;
-  }
-
-  const response = await fetch(payload.downloadUrl, { cache: 'no-store' });
-  if (!response.ok || !response.body) {
-    throw new Error(`下载请求失败：${response.status}`);
-  }
-
-  const writable = await fileHandle.createWritable();
-  const reader = response.body.getReader();
-  const hasher = await createSha256();
-  const expectedSize = payload.size || Number(response.headers.get('content-length')) || 0;
-  let receivedBytes = 0;
-  let closed = false;
-
-  try {
-    while (true) {
-      // eslint-disable-next-line no-await-in-loop
-      const { done, value } = await reader.read();
-      if (done) break;
-      hasher.update(value);
-      // eslint-disable-next-line no-await-in-loop
-      await writable.write(value);
-      receivedBytes += value.byteLength;
-      const percent = expectedSize
-        ? Math.min(100, Math.round((receivedBytes / expectedSize) * 100))
-        : 0;
-      updateTransferDisplay(display, {
-        percent,
-        status: `正在保存并校验 ${percent}%`,
-      });
-    }
-
-    const digest = hasher.digest('hex');
-    if (payload.sha256 && digest !== payload.sha256) {
-      throw new Error('下载后的 SHA-256 与发送端不一致。');
-    }
-    await writable.close();
-    closed = true;
-    completeTransferDisplay(display, `已下载并校验 SHA-256：${shortHash(digest)}`);
-    appendStatus(dom.fileStatus, `文件 "${filename}" 已保存，SHA-256 校验通过。`);
-  } finally {
-    if (!closed) {
-      await writable.abort().catch(() => {});
-    }
-  }
-};
-
-const appendDownloadActions = (display, payload) => {
-  const filename = payload.name || '接收文件';
-  const actions = document.createElement('div');
-  actions.className = 'transfer-actions';
-
-  const nativeLink = document.createElement('a');
-  nativeLink.href = payload.downloadUrl;
-  nativeLink.download = filename;
-  nativeLink.textContent = `下载 ${filename}`;
-  nativeLink.className = 'download-link';
-  nativeLink.rel = 'noopener';
-  actions.appendChild(nativeLink);
-
-  if (supportsVerifiedStreamingDownload()) {
-    const verifiedButton = document.createElement('button');
-    verifiedButton.type = 'button';
-    verifiedButton.className = 'secondary-action';
-    verifiedButton.textContent = '校验下载';
-    verifiedButton.addEventListener('click', async () => {
-      verifiedButton.disabled = true;
-      try {
-        await downloadWithVerification(payload, display);
-      } catch (error) {
-        failTransferDisplay(display, `校验下载失败：${error.message}`);
-        appendStatus(dom.fileStatus, `校验下载失败：${error.message}`);
-      } finally {
-        verifiedButton.disabled = false;
-      }
-    });
-    actions.appendChild(verifiedButton);
-  }
-
-  if (display) {
-    display.entry.appendChild(actions);
-    updateStatusPanelScroll(dom.fileStatus);
-  } else if (dom.fileStatus) {
-    dom.fileStatus.appendChild(actions);
-    updateStatusPanelScroll(dom.fileStatus);
-  }
-
-  const expiresIn = payload.expiresAt
-    ? Math.max(0, payload.expiresAt - Date.now())
-    : 2 * 60 * 60 * 1000;
-  setTimeout(() => {
-    if (nativeLink.isConnected) {
-      nativeLink.textContent = `${filename} 下载链接已过期`;
-      nativeLink.removeAttribute('href');
-      nativeLink.classList.add('download-link-disabled');
-    }
-  }, Math.min(expiresIn, 2 ** 31 - 1));
-};
-
-const sendDataChannelMessage = (channel, message) => {
-  if (!channel || channel.readyState !== 'open') {
-    throw createFallbackError('局域网直连通道尚未打开。');
-  }
-  channel.send(JSON.stringify(message));
-};
-
-const waitForDirectControl = (transferId, expectedTypes, peerId, timeout = DIRECT_CONTROL_TIMEOUT) =>
-  new Promise((resolve, reject) => {
-    const expected = new Set(Array.isArray(expectedTypes) ? expectedTypes : [expectedTypes]);
-    const timer = setTimeout(() => {
-      state.directControlWaiters.delete(transferId);
-      reject(createFallbackError('等待直连响应超时。'));
-    }, timeout);
-    state.directControlWaiters.set(transferId, {
-      peerId,
-      expected,
-      resolve: (message) => {
-        clearTimeout(timer);
-        resolve(message);
-      },
-      reject: (error) => {
-        clearTimeout(timer);
-        reject(error);
-      },
-    });
-  });
-
-const settleDirectControl = (message) => {
-  const transferId = message.id || message.transferId;
-  if (!transferId) return false;
-  const waiter = state.directControlWaiters.get(transferId);
-  if (!waiter || !waiter.expected.has(message.type)) return false;
-  state.directControlWaiters.delete(transferId);
-  waiter.resolve(message);
-  return true;
-};
-
-const waitForDirectChunkAck = (transferId, index, peerId) =>
-  new Promise((resolve, reject) => {
-    const key = directAckKey(transferId, index);
-    const timer = setTimeout(() => {
-      state.directChunkAckWaiters.delete(key);
-      reject(createFallbackError('等待直连分片确认超时。'));
-    }, DIRECT_CHUNK_ACK_TIMEOUT);
-    state.directChunkAckWaiters.set(key, {
-      peerId,
-      resolve: (message) => {
-        clearTimeout(timer);
-        resolve(message);
-      },
-      reject: (error) => {
-        clearTimeout(timer);
-        reject(error);
-      },
-    });
-  });
-
-const settleDirectChunkAck = (message) => {
-  const key = directAckKey(message.id, message.index);
-  const waiter = state.directChunkAckWaiters.get(key);
-  if (!waiter) return false;
-  state.directChunkAckWaiters.delete(key);
-  waiter.resolve(message);
-  return true;
-};
-
-const rejectDirectWaiters = (peerId, error) => {
-  for (const [transferId, waiter] of state.directControlWaiters.entries()) {
-    if (waiter.peerId !== peerId) continue;
-    state.directControlWaiters.delete(transferId);
-    waiter.reject(error);
-  }
-  for (const [key, waiter] of state.directChunkAckWaiters.entries()) {
-    if (waiter.peerId !== peerId) continue;
-    state.directChunkAckWaiters.delete(key);
-    waiter.reject(error);
-  }
-};
-
-const rejectDirectWaitersForTransfer = (transferId, error) => {
-  const controlWaiter = state.directControlWaiters.get(transferId);
-  if (controlWaiter) {
-    state.directControlWaiters.delete(transferId);
-    controlWaiter.reject(error);
-  }
-  for (const [key, waiter] of state.directChunkAckWaiters.entries()) {
-    if (!key.startsWith(`${transferId}:`)) continue;
-    state.directChunkAckWaiters.delete(key);
-    waiter.reject(error);
-  }
-};
-
-const directSaveOverlayState = {
-  active: false,
-  resolve: null,
-  cleanup: null,
-  restoreFocus: null,
-};
-
-const closeDirectSaveOverlay = (result) => {
-  if (!dom.directSaveOverlay) return;
-  if (typeof directSaveOverlayState.cleanup === 'function') {
-    directSaveOverlayState.cleanup();
-  }
-  dom.directSaveOverlay.hidden = true;
-  if (dom.directSaveMeta) {
-    dom.directSaveMeta.textContent = '';
-  }
-  if (dom.directSaveMessage) {
-    dom.directSaveMessage.textContent = '';
-  }
-  if (directSaveOverlayState.restoreFocus && typeof directSaveOverlayState.restoreFocus.focus === 'function') {
-    directSaveOverlayState.restoreFocus.focus();
-  }
-  const resolver = directSaveOverlayState.resolve;
-  directSaveOverlayState.active = false;
-  directSaveOverlayState.resolve = null;
-  directSaveOverlayState.cleanup = null;
-  directSaveOverlayState.restoreFocus = null;
-  if (resolver) {
-    resolver(result || { action: 'reject', message: '接收方取消了文件接收。' });
-  }
-};
-
-const openDirectSaveOverlay = ({ peerName, name, size, mime }) => {
-  if (!dom.directSaveOverlay) {
-    return Promise.resolve({ action: 'temp' });
-  }
-  if (directSaveOverlayState.active) {
-    closeDirectSaveOverlay({
-      action: 'reject',
-      message: '已有文件接收确认正在处理。',
-    });
-  }
-
-  return new Promise((resolve) => {
-    directSaveOverlayState.active = true;
-    directSaveOverlayState.resolve = resolve;
-    directSaveOverlayState.restoreFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-
-    if (dom.directSaveTitle) {
-      dom.directSaveTitle.textContent = '接收文件';
-    }
-    if (dom.directSaveMessage) {
-      dom.directSaveMessage.textContent = `${peerName} 正在通过局域网直连发送文件。`;
-    }
-    if (dom.directSaveMeta) {
-      const format = mime ? ` · ${mime}` : '';
-      dom.directSaveMeta.textContent = `${name || '未命名文件'} · ${humanFileSize(size)}${format}`;
-    }
-    if (dom.directSaveConfirm) {
-      dom.directSaveConfirm.disabled = !supportsDirectSaveToDisk();
-      dom.directSaveConfirm.textContent = supportsDirectSaveToDisk() ? '实时保存' : '不支持实时保存';
-      dom.directSaveConfirm.title = supportsDirectSaveToDisk()
-        ? '选择保存位置后，数据到达时会直接写入该文件'
-        : '当前浏览器不支持 File System Access API';
-    }
-
-    const handleSave = async () => {
-      if (!supportsDirectSaveToDisk()) {
-        if (dom.directSaveMessage) {
-          dom.directSaveMessage.textContent = '当前浏览器不支持实时保存，请选择临时接收或等待服务器中转。';
-        }
-        return;
-      }
-      try {
-        const fileHandle = await window.showSaveFilePicker({
-          suggestedName: name || '接收文件',
-        });
-        const writable = await fileHandle.createWritable();
-        closeDirectSaveOverlay({
-          action: 'save',
-          storage: 'direct-save',
-          fileHandle,
-          writable,
-        });
-      } catch (error) {
-        if (error?.name === 'AbortError') {
-          if (dom.directSaveMessage) {
-            dom.directSaveMessage.textContent = '未选择保存位置，可以重新选择、临时接收或拒绝。';
-          }
-          return;
-        }
-        if (dom.directSaveMessage) {
-          dom.directSaveMessage.textContent = `打开保存位置失败：${error.message}`;
-        }
-      }
-    };
-
-    const handleTemp = () => {
-      closeDirectSaveOverlay({ action: 'temp' });
-    };
-
-    const handleCancel = () => {
-      closeDirectSaveOverlay({
-        action: 'reject',
-        message: '接收方拒绝了文件接收。',
-      });
-    };
-
-    const handleKeydown = (event) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        handleCancel();
-      }
-    };
-
-    const detach = () => {
-      dom.directSaveConfirm?.removeEventListener('click', handleSave);
-      dom.directSaveTemp?.removeEventListener('click', handleTemp);
-      dom.directSaveCancel?.removeEventListener('click', handleCancel);
-      dom.directSaveOverlay?.removeEventListener('keydown', handleKeydown, true);
-    };
-
-    dom.directSaveConfirm?.addEventListener('click', handleSave);
-    dom.directSaveTemp?.addEventListener('click', handleTemp);
-    dom.directSaveCancel?.addEventListener('click', handleCancel);
-    dom.directSaveOverlay?.addEventListener('keydown', handleKeydown, true);
-    directSaveOverlayState.cleanup = detach;
-    dom.directSaveOverlay.hidden = false;
-
-    setTimeout(() => {
-      if (supportsDirectSaveToDisk()) {
-        dom.directSaveConfirm?.focus();
-      } else {
-        dom.directSaveTemp?.focus();
-      }
-    }, 0);
-  });
-};
-
-const cleanupDirectTransferStorage = async (transfer) => {
-  if (!transfer) return;
-  if (transfer.writable && !transfer.storageClosed) {
-    await transfer.writable.abort().catch(() => {});
-    transfer.storageClosed = true;
-  }
-  if (transfer.opfsRoot && transfer.opfsName) {
-    await transfer.opfsRoot.removeEntry(transfer.opfsName).catch(() => {});
-  }
-};
-
-const createTemporaryDirectReceiveStorage = async (transferId, size) => {
-  if (supportsOriginPrivateFileSystem()) {
-    try {
-      const root = await navigator.storage.getDirectory();
-      const opfsName = `snapsend-${transferId}.part`;
-      const fileHandle = await root.getFileHandle(opfsName, { create: true });
-      const writable = await fileHandle.createWritable();
-      return {
-        storage: 'opfs',
-        fileHandle,
-        writable,
-        opfsRoot: root,
-        opfsName,
-      };
-    } catch (error) {
-      appendStatus(dom.fileStatus, `无法启用浏览器临时文件存储，准备检查内存接收能力：${error.message}`);
-    }
-  }
-
-  if (size <= DIRECT_MEMORY_LIMIT) {
-    return {
-      storage: 'memory',
-      chunks: [],
-    };
-  }
-
-  return null;
-};
-
-const createDirectReceiveStorage = async ({ transferId, peerId, name, size, mime }) => {
-  const choice = await openDirectSaveOverlay({
-    peerName: peerLabel(peerId),
-    name,
-    size,
-    mime,
-  });
-
-  if (choice.action === 'reject') {
-    return {
-      rejected: true,
-      message: choice.message || '接收方拒绝了文件接收。',
-    };
-  }
-
-  if (choice.action === 'save') {
-    return {
-      storage: 'direct-save',
-      fileHandle: choice.fileHandle,
-      writable: choice.writable,
-    };
-  }
-
-  const temporaryStorage = await createTemporaryDirectReceiveStorage(transferId, size);
-  if (temporaryStorage) {
-    return temporaryStorage;
-  }
-
-  return {
-    rejected: true,
-    message: `当前浏览器无法安全直连接收 ${humanFileSize(size)}，请使用服务器中转。`,
-  };
-};
-
-const finalizeDirectDownload = async (transfer, sha256) => {
-  const filename = transfer.meta.name || '接收文件';
-  let blob;
-  if (transfer.storage === 'direct-save') {
-    await transfer.writable.close();
-    transfer.storageClosed = true;
-    if (transfer.display) {
-      completeTransferDisplay(transfer.display, `已实时保存到本地文件，SHA-256：${shortHash(sha256)}`);
-      updateStatusPanelScroll(dom.fileStatus);
-    }
-    appendStatus(dom.fileStatus, `已通过局域网直连实时保存 "${filename}"，SHA-256 校验通过。`);
-    return;
-  }
-
-  if (transfer.storage === 'opfs') {
-    await transfer.writable.close();
-    transfer.storageClosed = true;
-    blob = await transfer.fileHandle.getFile();
-  } else {
-    blob = new Blob(transfer.chunks, {
-      type: transfer.meta.mime || 'application/octet-stream',
-    });
-  }
-
-  const downloadUrl = triggerDownload(blob, filename);
-  const link = document.createElement('a');
-  link.href = downloadUrl;
-  link.download = filename;
-  link.textContent = `重新下载 ${filename}`;
-  link.className = 'download-link';
-  link.rel = 'noopener';
-  const actions = document.createElement('div');
-  actions.className = 'transfer-actions';
-  actions.appendChild(link);
-  if (transfer.display) {
-    completeTransferDisplay(transfer.display, `直连接收完成，SHA-256：${shortHash(sha256)}`);
-    transfer.display.entry.appendChild(actions);
-    updateStatusPanelScroll(dom.fileStatus);
-  }
-  appendStatus(dom.fileStatus, `已通过局域网直连接收 "${filename}"，SHA-256 校验通过。`);
-
-  setTimeout(() => {
-    URL.revokeObjectURL(downloadUrl);
-    if (link.isConnected) {
-      link.textContent = `${filename} 下载链接已过期`;
-      link.removeAttribute('href');
-      link.classList.add('download-link-disabled');
-    }
-    if (transfer.storage === 'opfs') {
-      cleanupDirectTransferStorage(transfer);
-    }
-  }, 5 * 60 * 1000);
-};
-
-const setServerStatus = (text) => {
-  if (dom.statusServer) {
-    dom.statusServer.textContent = text;
-  }
-};
-
-
-const appendActivity = (kind, description) => {
-  if (!dom.activityLog) return;
-  const entry = document.createElement('div');
-  entry.className = `activity-entry activity-${kind}`;
-  const timestamp = formatClock();
-  const label = document.createElement('strong');
-  label.textContent = `[${timestamp}] ${ACTIVITY_LABELS[kind] || ACTIVITY_LABELS.status}`;
-  const text = document.createElement('span');
-  text.textContent = description;
-  entry.append(label, text);
-  dom.activityLog.appendChild(entry);
-  while (dom.activityLog.children.length > ACTIVITY_LIMIT) {
-    dom.activityLog.removeChild(dom.activityLog.firstChild);
-  }
-  dom.activityLog.scrollTop = dom.activityLog.scrollHeight;
-};
-
-const describeOutbound = (type, payload = {}) => {
-  switch (type) {
-    case 'text-message': {
-      const target = payload.targetId ? `向 ${payload.targetId}` : '向所有设备';
-      const preview = payload.message ? `：${truncate(payload.message)}` : '';
-      return `${target}发送消息${preview}`;
-    }
-    case 'clipboard-update': {
-      const target = payload.targetId ? `向 ${payload.targetId}` : '向所有设备';
-      const preview = payload.content ? `：${truncate(payload.content)}` : '';
-      return `${target}同步剪贴板${preview}`;
-    }
-    case 'register':
-      return payload.displayName
-        ? `更新设备名称为「${payload.displayName}」`
-        : '更新设备名称';
-    case 'signal': {
-      const kind = payload.data?.type || 'signal';
-      const target = payload.targetId ? ` → ${payload.targetId}` : '';
-      return `发送 ${kind} 信令${target}`;
-    }
-    case 'poke': {
-      const target = payload.targetId ? peerLabel(payload.targetId) : '未知设备';
-      return `我拍了拍 ${target}`;
-    }
-    case 'file-transfer-meta': {
-      const target = payload.targetId ? peerLabel(payload.targetId) : '未知设备';
-      return `准备通过服务器向 ${target} 发送文件「${payload.name || '未命名文件'}」`;
-    }
-    case 'file-transfer-complete': {
-      const target = payload.targetId ? peerLabel(payload.targetId) : '未知设备';
-      return `已通过服务器向 ${target} 发送完「${payload.name || '文件'}」`;
-    }
-    case 'file-transfer-error': {
-      const target = payload.targetId ? peerLabel(payload.targetId) : '未知设备';
-      return `向 ${target} 发送文件失败：${payload.message || '服务器中转错误'}`;
-    }
-    case 'large-file-error': {
-      const target = payload.targetId ? peerLabel(payload.targetId) : '未知设备';
-      return `向 ${target} 发送大文件失败：${payload.message || '传输错误'}`;
-    }
-    default:
-      return `发送 ${type}`;
-  }
-};
-
-const describeInbound = (type, payload = {}) => {
-  switch (type) {
-    case 'welcome':
-      return `收到欢迎消息，设备 ID：${payload.id}`;
-    case 'peer-joined':
-      return `设备 ${payload.displayName || payload.id} 加入网络`;
-    case 'peer-updated':
-      return `设备 ${payload.displayName || payload.id} 信息更新`;
-    case 'peer-left':
-      return `设备 ${payload.displayName || payload.id} 已离开`;
-    case 'registered':
-      return `注册成功，当前名称为「${payload.displayName}」`;
-    case 'text-message': {
-      const preview = payload.message ? `：${truncate(payload.message)}` : '';
-      return `${payload.displayName || payload.from} 发来消息${preview}`;
-    }
-    case 'clipboard-update': {
-      const preview = payload.content ? `：${truncate(payload.content)}` : '';
-      return `${payload.displayName || payload.from} 推送剪贴板${preview}`;
-    }
-    case 'signal': {
-      const kind = payload.data?.type || 'signal';
-      return `收到 ${kind} 信令来自 ${payload.from}`;
-    }
-    case 'poke':
-      return `${payload.displayName || payload.from} 拍了拍你`;
-    case 'file-transfer-meta':
-      return `${payload.displayName || payload.from} 正在通过服务器发送「${payload.name || '文件'}」`;
-    case 'file-transfer-complete':
-      return `${payload.displayName || payload.from} 已通过服务器发送完「${payload.name || '文件'}」`;
-    case 'file-transfer-error':
-      if (payload?.targetId) {
-        return `向 ${peerLabel(payload.targetId)} 发送文件失败：${payload.message || '服务器中转错误'}`;
-      }
-      return `${payload.displayName || payload.from || '未知设备'} 的文件发送失败：${payload.message || '服务器中转错误'}`;
-    case 'large-file-meta':
-      return `${payload.displayName || payload.from} 正在上传大文件「${payload.name || '文件'}」`;
-    case 'large-file-progress':
-      return `${payload.from || '对方'} 的大文件已上传 ${payload.percent || 0}%`;
-    case 'large-file-ready':
-      return `${payload.displayName || payload.from} 的大文件「${payload.name || '文件'}」已校验完成`;
-    case 'large-file-error':
-      if (payload?.targetId) {
-        return `向 ${peerLabel(payload.targetId)} 发送大文件失败：${payload.message || '传输错误'}`;
-      }
-      return `${payload.displayName || payload.from || '未知设备'} 的大文件传输失败：${payload.message || '传输错误'}`;
-    case 'clipboard-error':
-    case 'delivery-error':
-    case 'signal-error':
-    case 'error':
-      return payload.message ? `错误：${payload.message}` : '收到错误消息';
-    case 'ping':
-      return '收到服务器 ping';
-    default:
-      return `收到 ${type}`;
-  }
-};
-
-const appendStatus = (container, message) => {
-  const entry = document.createElement('p');
-  const time = formatClock();
-  entry.textContent = `[${time}] ${message}`;
-  if (container) {
-    container.appendChild(entry);
-    updateStatusPanelScroll(container);
-  }
-  const label = container?.dataset?.activityLabel;
-  appendActivity('status', label ? `${label}：${message}` : message);
-};
-
-const addMessage = ({ from, displayName, message, timestamp }) => {
-  const wrapper = document.createElement('div');
-  wrapper.className = 'message';
-
-  const meta = document.createElement('div');
-  meta.className = 'meta';
-  const sender = from === state.selfId ? '我' : displayName || from;
-  const timeText = new Date(timestamp).toLocaleTimeString('zh-CN', { hour12: false });
-  meta.textContent = `${sender} • ${timeText}`;
-
-  const body = document.createElement('p');
-  body.className = 'body';
-  body.textContent = message;
-
-  wrapper.appendChild(meta);
-  wrapper.appendChild(body);
-  dom.messages.appendChild(wrapper);
-  dom.messages.scrollTop = dom.messages.scrollHeight;
-};
-
-const persistDisplayName = (name) => {
-  try {
-    localStorage.setItem('snapsend:displayName', name);
+    localStorage.setItem('landu:theme', nextTheme);
   } catch {
     /* ignored */
   }
 };
 
-const loadDisplayName = () => {
-  try {
-    return localStorage.getItem('snapsend:displayName') || '';
-  } catch {
-    return '';
-  }
+const toBase64 = (value) =>
+  btoa(String.fromCharCode(...new TextEncoder().encode(value)))
+    .replace(/=/g, '')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_');
+
+const clientInfo = () => ({
+  alias: state.displayName,
+  version: '2.1',
+  deviceModel: `Landu · ${state.platform}`,
+  deviceType: 'WEB',
+  token: state.token,
+  pin: state.pin,
+});
+
+const toPeer = (peer) => {
+  if (!peer?.token?.startsWith(CLIENT_TOKEN_PREFIX)) return null;
+  if (peer.token === state.token) return null;
+  return {
+    id: peer.id,
+    name: peer.alias || 'Landu',
+    platform: peer.deviceModel || peer.deviceType || 'Web',
+  };
 };
 
-const savedDisplayName = loadDisplayName();
-if (savedDisplayName) {
-  state.displayName = savedDisplayName;
-  if (dom.displayName) {
-    dom.displayName.value = savedDisplayName;
-  }
-  if (dom.currentDisplayName) {
-    dom.currentDisplayName.textContent = savedDisplayName;
-  }
-}
+const platformLabel = () => {
+  const ua = navigator.userAgent;
+  const os = /Mac/i.test(ua) ? 'macOS' : /Windows/i.test(ua) ? 'Windows' : /Android/i.test(ua) ? 'Android' : /iPhone|iPad/i.test(ua) ? 'iOS' : 'Web';
+  const browser = /Firefox/i.test(ua) ? 'Firefox' : /Edg/i.test(ua) ? 'Edge' : /Safari/i.test(ua) && !/Chrome/i.test(ua) ? 'Safari' : 'Chrome';
+  return `${os} · ${browser}`;
+};
 
-const updateSelectors = () => {
-  const selects = [dom.fileTarget, dom.clipboardTarget, dom.chatTarget];
-  selects.forEach((select) => {
-    const selected = select.value;
-    while (select.options.length > 1) {
-      select.remove(1);
-    }
-    for (const [peerId, peer] of state.peers) {
-      const option = document.createElement('option');
-      option.value = peerId;
-      option.textContent = peer.displayName || peerId;
-      select.appendChild(option);
-    }
-    if (selected && state.peers.has(selected)) {
-      select.value = selected;
-    } else {
-      select.value = '';
-    }
-  });
+const state = {
+  id: '',
+  displayName: loadName(),
+  token: loadToken(),
+  pin: loadPin(),
+  platform: platformLabel(),
+  peers: new Map(),
+  activePeerId: '',
+  ws: null,
+  pingTimer: 0,
+  clipboardTimer: 0,
+  incomingFiles: new Map(),
+  outgoingFileAcks: new Map(),
+  pendingRtcChunks: new Map(),
+  rtc: new Map(),
+  addresses: { mdns: '', ip: '' },
+  addressMode: 'mdns',
+};
+
+applyTheme(loadTheme());
+dom.currentDisplayName.textContent = state.displayName;
+dom.pinValue.textContent = state.pin || '未设置';
+
+const showToast = (message) => {
+  dom.toast.textContent = message;
+  dom.toast.hidden = false;
+  clearTimeout(showToast.timer);
+  showToast.timer = setTimeout(() => {
+    dom.toast.hidden = true;
+  }, 2600);
+};
+
+const updateTransferUi = () => {};
+
+const selectedAddress = () =>
+  (state.addressMode === 'ip' && state.addresses.ip ? state.addresses.ip : state.addresses.mdns) ||
+  location.origin;
+
+const updateAddressDisplay = () => {
+  const url = selectedAddress();
+  const label = state.addressMode === 'ip' && state.addresses.ip ? 'IP 地址' : 'mDNS 地址';
+  dom.mdnsAddress.textContent = state.addresses.mdns || location.origin;
+  dom.ipAddress.textContent = state.addresses.ip || '未找到 IP 地址';
+  dom.qrLabel.textContent = label;
+  dom.addressQr.src = `/api/qr?text=${encodeURIComponent(url)}`;
+};
+
+const loadAddresses = async () => {
+  try {
+    const response = await fetch('/api/addresses');
+    state.addresses = await response.json();
+  } catch {
+    state.addresses = { mdns: location.origin, ip: '' };
+  }
+  updateAddressDisplay();
 };
 
 const renderPeers = () => {
   dom.peerList.innerHTML = '';
-  for (const [peerId, peer] of state.peers.entries()) {
-    const fragment = document.importNode(dom.peerTemplate.content, true);
-    fragment.querySelector('.peer-name').textContent = peer.displayName || '未命名设备';
-    fragment.querySelector('.peer-id').textContent = peerId;
-    const button = fragment.querySelector('.start-connection');
-    button.dataset.peerId = peerId;
-    button.textContent = '拍一拍';
+  dom.emptyPeers.hidden = state.peers.size > 0;
+  for (const peer of state.peers.values()) {
+    const button = document.createElement('button');
+    button.className = 'peer-card';
+    button.type = 'button';
+    button.dataset.state = state.activePeerId === peer.id ? 'connected' : 'idle';
+    button.innerHTML = `
+      <span class="peer-avatar material-symbols-outlined" aria-hidden="true">question_mark</span>
+      <span>
+        <strong></strong>
+        <p></p>
+      </span>
+    `;
+    button.querySelector('strong').textContent = peer.name || 'Unknown Device';
+    const transport = state.rtc.get(peer.id)?.channel?.readyState === 'open' ? 'WebRTC' : '本地服务';
+    button.querySelector('p').textContent = `${peer.platform || 'Web'} · ${transport}`;
     button.addEventListener('click', () => {
-      sendWsMessage('poke', { targetId: peerId });
+      state.activePeerId = peer.id;
+      dom.fileInput.value = '';
+      dom.fileInput.click();
     });
-    dom.peerList.appendChild(fragment);
+    dom.peerList.append(button);
   }
-  updateSelectors();
+  updateTransferUi();
 };
 
-const sendWsMessage = (type, payload) => {
-  const socket = state.ws;
-  if (!socket || socket.readyState !== WebSocket.OPEN) {
-    appendActivity('warning', `未发送 ${type}：连接尚未建立。`);
-    return;
-  }
-  socket.send(JSON.stringify({ type, payload }));
-  if (!SILENCED_OUTBOUND_TYPES.has(type)) {
-    appendActivity('outbound', describeOutbound(type, payload));
+const signalSend = (message) => {
+  if (state.ws?.readyState === WebSocket.OPEN) {
+    state.ws.send(JSON.stringify(message));
   }
 };
 
-const createPeerContext = (peerId) => {
-  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-  const ready = deferred();
+const sendRtcSignal = (peerId, type, payload = {}) => {
+  signalSend({ type: 'RELAY', target: peerId, payload: { type, payload } });
+};
+
+const closeRtc = (peerId) => {
+  const context = state.rtc.get(peerId);
+  if (!context) return;
+  state.rtc.delete(peerId);
+  state.pendingRtcChunks.delete(peerId);
+  try {
+    context.channel?.close();
+    context.pc.close();
+  } catch {
+    /* ignored */
+  }
+  renderPeers();
+};
+
+const waitForRtcChannel = (channel) => {
+  if (channel?.readyState === 'open') return Promise.resolve(channel);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('WebRTC 连接超时')), RTC_CONNECT_TIMEOUT);
+    const cleanup = () => {
+      clearTimeout(timer);
+      channel?.removeEventListener('open', handleOpen);
+      channel?.removeEventListener('close', handleClose);
+      channel?.removeEventListener('error', handleClose);
+    };
+    const handleOpen = () => {
+      cleanup();
+      resolve(channel);
+    };
+    const handleClose = () => {
+      cleanup();
+      reject(new Error('WebRTC 连接已关闭'));
+    };
+    channel?.addEventListener('open', handleOpen);
+    channel?.addEventListener('close', handleClose);
+    channel?.addEventListener('error', handleClose);
+  });
+};
+
+const waitForRtcBuffer = (channel) => {
+  if (channel.bufferedAmount <= RTC_BUFFER_LIMIT) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      channel.removeEventListener('bufferedamountlow', handleLow);
+      channel.removeEventListener('close', handleClose);
+      channel.removeEventListener('error', handleClose);
+    };
+    const handleLow = () => {
+      cleanup();
+      resolve();
+    };
+    const handleClose = () => {
+      cleanup();
+      reject(new Error('WebRTC 连接已关闭'));
+    };
+    channel.addEventListener('bufferedamountlow', handleLow);
+    channel.addEventListener('close', handleClose);
+    channel.addEventListener('error', handleClose);
+  });
+};
+
+const sendRtcPacket = async (channel, packet) => {
+  if (channel?.readyState !== 'open') throw new Error('WebRTC 通道不可用');
+  channel.send(JSON.stringify(packet));
+  await waitForRtcBuffer(channel);
+};
+
+const sendRtcBinary = async (channel, buffer) => {
+  if (channel?.readyState !== 'open') throw new Error('WebRTC 通道不可用');
+  channel.send(buffer);
+  await waitForRtcBuffer(channel);
+};
+
+const attachRtcChannel = (context, channel) => {
+  context.channel = channel;
+  channel.binaryType = 'arraybuffer';
+  channel.bufferedAmountLowThreshold = RTC_BUFFER_LIMIT / 2;
+  channel.addEventListener('open', renderPeers);
+  channel.addEventListener('close', renderPeers);
+  channel.addEventListener('message', (event) => {
+    if (typeof event.data !== 'string') {
+      receiveRtcBinaryChunk(context.peerId, event.data);
+      return;
+    }
+    try {
+      handleJsonMessage(context.peerId, JSON.parse(event.data));
+    } catch {
+      /* ignored */
+    }
+  });
+};
+
+const flushRtcCandidates = async (context) => {
+  while (context.candidates.length && context.pc.remoteDescription) {
+    const candidate = context.candidates.shift();
+    await context.pc.addIceCandidate(candidate).catch(() => {});
+  }
+};
+
+const createRtcContext = (peerId) => {
+  const pc = new RTCPeerConnection();
   const context = {
     peerId,
     pc,
-    ready,
-    dataChannel: null,
-    hasLocalDescription: false,
-    pendingCandidates: [],
+    channel: null,
+    candidates: [],
+    makingOffer: false,
+    ignoreOffer: false,
+    offerPromise: null,
+    polite: state.id > peerId,
   };
 
-  pc.onicecandidate = ({ candidate }) => {
-    if (candidate) {
-      sendWsMessage('signal', {
-        targetId: peerId,
-        data: { type: 'candidate', candidate },
-      });
-    }
-  };
+  pc.addEventListener('icecandidate', ({ candidate }) => {
+    if (candidate) sendRtcSignal(peerId, 'rtc-candidate', { candidate });
+  });
 
-  pc.onconnectionstatechange = () => {
-    const stateText = pc.connectionState;
-    appendStatus(null, `与 ${peerLabel(peerId)} 的连接状态：${stateText}`);
-    if (stateText === 'failed') {
-      context.ready?.reject?.(new Error('数据通道连接失败。'));
-    }
-    if (stateText === 'failed' || stateText === 'closed' || stateText === 'disconnected') {
-      cleanupPeer(peerId, { reason: 'connection-state', state: stateText });
-    }
-  };
+  pc.addEventListener('datachannel', ({ channel }) => {
+    attachRtcChannel(context, channel);
+  });
 
-  pc.ondatachannel = (event) => {
-    context.dataChannel = event.channel;
-    attachDataChannel(peerId, context.dataChannel, context);
-  };
+  pc.addEventListener('connectionstatechange', () => {
+    if (pc.connectionState === 'failed' || pc.connectionState === 'closed') closeRtc(peerId);
+  });
 
-  state.peerConnections.set(peerId, context);
-  const earlyCandidates = state.orphanCandidates.get(peerId);
-  if (earlyCandidates) {
-    context.pendingCandidates.push(...earlyCandidates);
-    state.orphanCandidates.delete(peerId);
-  }
+  state.rtc.set(peerId, context);
   return context;
 };
 
-const cleanupPeer = (peerId, options = {}) => {
-  const { reason = 'generic' } = options;
-  const treatAsOffline = reason === 'peer-left' || reason === 'ws-closed' || reason === 'reset';
-  const context = state.peerConnections.get(peerId);
-  if (context) {
-    try {
-      if (context.dataChannel && context.dataChannel.readyState !== 'closed') {
-        context.dataChannel.close();
-      }
-      context.pc.close();
-    } catch {
-      /* ignored */
-    }
-    state.peerConnections.delete(peerId);
+const getRtcContext = (peerId) => state.rtc.get(peerId) || createRtcContext(peerId);
+
+const openRtcChannel = async (peerId) => {
+  if (!('RTCPeerConnection' in window)) throw new Error('当前浏览器不支持 WebRTC');
+  const context = getRtcContext(peerId);
+  if (context.channel?.readyState === 'open') return context.channel;
+  if (!context.channel || context.channel.readyState === 'closed') {
+    attachRtcChannel(context, context.pc.createDataChannel('landu'));
   }
-  for (const [key, transfer] of state.incomingTransfers.entries()) {
-    if (transfer.peerId !== peerId) continue;
-    if ((transfer.mode === 'relay' || transfer.mode === 'http-relay') && !treatAsOffline) {
+  if (!context.offerPromise && context.pc.signalingState === 'stable') {
+    context.offerPromise = (async () => {
+      context.makingOffer = true;
+      try {
+        const offer = await context.pc.createOffer();
+        await context.pc.setLocalDescription(offer);
+        sendRtcSignal(peerId, 'rtc-offer', { description: context.pc.localDescription });
+      } finally {
+        context.makingOffer = false;
+        context.offerPromise = null;
+      }
+    })();
+  }
+  if (context.offerPromise) await context.offerPromise;
+  return waitForRtcChannel(context.channel);
+};
+
+const acceptRtcOffer = async (peerId, description) => {
+  if (!('RTCPeerConnection' in window)) return;
+  const context = getRtcContext(peerId);
+  const pc = context.pc;
+  const offerCollision = context.makingOffer || pc.signalingState !== 'stable';
+  context.ignoreOffer = !context.polite && offerCollision;
+  if (context.ignoreOffer) return;
+  if (offerCollision) await pc.setLocalDescription({ type: 'rollback' }).catch(() => {});
+  await pc.setRemoteDescription(description);
+  await flushRtcCandidates(context);
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  sendRtcSignal(peerId, 'rtc-answer', { description: pc.localDescription });
+};
+
+const acceptRtcAnswer = async (peerId, description) => {
+  const context = state.rtc.get(peerId);
+  if (!context || context.pc.signalingState !== 'have-local-offer') return;
+  await context.pc.setRemoteDescription(description);
+  await flushRtcCandidates(context);
+};
+
+const acceptRtcCandidate = async (peerId, candidate) => {
+  if (!('RTCPeerConnection' in window) || !candidate) return;
+  const context = getRtcContext(peerId);
+  if (context.ignoreOffer && !context.pc.remoteDescription) return;
+  if (!context.pc.remoteDescription) {
+    context.candidates.push(candidate);
+    return;
+  }
+  await context.pc.addIceCandidate(candidate).catch(() => {});
+};
+
+const upsertPeer = (rawPeer) => {
+  const peer = toPeer(rawPeer);
+  if (peer && peer.id !== state.id) state.peers.set(peer.id, peer);
+};
+
+const replacePeers = (rawPeers = []) => {
+  state.peers.clear();
+  for (const peer of rawPeers) upsertPeer(peer);
+  renderPeers();
+};
+
+const sanitizeStyle = (style = '') =>
+  style
+    .split(';')
+    .map((rule) => rule.trim())
+    .filter((rule) => /^(color|background-color|font-weight|font-style|text-decoration|font-size|font-family|text-align)\s*:/i.test(rule))
+    .join('; ');
+
+const sanitizeHtml = (html = '') => {
+  const template = document.createElement('template');
+  template.innerHTML = html;
+  const blockedTags = new Set(['SCRIPT', 'STYLE', 'IFRAME', 'OBJECT', 'EMBED', 'LINK', 'META', 'SVG', 'MATH']);
+  for (const element of template.content.querySelectorAll('*')) {
+    if (blockedTags.has(element.tagName)) {
+      element.remove();
       continue;
     }
-    if (transfer.display) {
-      if (transfer.mode === 'webrtc' || transfer.mode === 'direct') {
-        failTransferDisplay(transfer.display, '连接已关闭。');
-      } else if (transfer.mode === 'relay' || transfer.mode === 'http-relay') {
-        failTransferDisplay(transfer.display, '对方已离线，服务器中转已中止。');
+    for (const attr of [...element.attributes]) {
+      const name = attr.name.toLowerCase();
+      const value = attr.value.trim();
+      if (name.startsWith('on') || name === 'srcdoc' || name === 'id') element.removeAttribute(attr.name);
+      if ((name === 'href' || name === 'src') && !/^(https?:|data:image\/|blob:|#|\/)/i.test(value)) element.removeAttribute(attr.name);
+      if (name === 'style') {
+        const safeStyle = /url\s*\(|expression\s*\(/i.test(value) ? '' : sanitizeStyle(value);
+        if (safeStyle) element.setAttribute('style', safeStyle);
+        else element.removeAttribute(attr.name);
       }
     }
-    cleanupDirectTransferStorage(transfer);
-    state.incomingTransfers.delete(key);
   }
-  const outgoing = state.outgoingTransfers.get(peerId);
-  if (outgoing) {
-    const isRelay = outgoing.mode === 'relay' || outgoing.mode === 'http-relay';
-    if (!isRelay || treatAsOffline) {
-      if (outgoing.display) {
-        if (outgoing.mode === 'webrtc' || outgoing.mode === 'direct') {
-          const filePhrase = outgoing.fileName ? `「${outgoing.fileName}」` : '文件';
-          failTransferDisplay(outgoing.display, `连接已关闭，${filePhrase}可能未完成。`);
-        } else if (treatAsOffline) {
-          failTransferDisplay(outgoing.display, '对方已离线，服务器中转失败。');
-        }
-      }
-      state.outgoingTransfers.delete(peerId);
-    }
-  }
-  for (const [transferId, trackerInfo] of state.transferTrackers.entries()) {
-    if (trackerInfo.peerId !== peerId) continue;
-    const tracker = trackerInfo.tracker;
-    if ((tracker.mode === 'relay' || tracker.mode === 'http-relay') && !treatAsOffline) {
-      continue;
-    }
-    tracker.cancelled = true;
-    tracker.cancelledReason = treatAsOffline ? '对方已离线。' : '数据通道连接失败。';
-    if (tracker.display) {
-      const message =
-        (tracker.mode === 'relay' || tracker.mode === 'http-relay') && treatAsOffline
-          ? '对方已离线，服务器中转失败。'
-          : tracker.cancelledReason;
-      failTransferDisplay(tracker.display, message);
-    }
-    state.transferTrackers.delete(transferId);
-  }
-  rejectDirectWaiters(peerId, createFallbackError('局域网直连已断开。'));
-  state.orphanCandidates.delete(peerId);
+  return template.innerHTML;
 };
 
-const applyIceCandidate = async (context, candidateInit) => {
-  try {
-    await context.pc.addIceCandidate(new RTCIceCandidate(candidateInit));
-  } catch (error) {
-    appendStatus(
-      dom.fileStatus,
-      `处理 ${peerLabel(context.peerId)} 的 ICE 候选信息失败：${error.message}`,
-    );
-  }
+const clipboardPayload = () => ({
+  text: dom.clipboardText.innerText || dom.clipboardText.textContent || '',
+  html: sanitizeHtml(dom.clipboardText.innerHTML).trim(),
+});
+
+const hasClipboardPayload = ({ text, html }) => Boolean(text.trim() || html.replace(/<br\s*\/?>/gi, '').trim());
+
+const renderClipboardPayload = ({ text = '', html = '' }) => {
+  if (html) dom.clipboardText.innerHTML = sanitizeHtml(html);
+  else dom.clipboardText.textContent = text;
 };
 
-const flushPendingCandidates = async (context) => {
-  while (context.pendingCandidates.length > 0) {
-    const candidateInit = context.pendingCandidates.shift();
-    await applyIceCandidate(context, candidateInit);
-  }
+const shareClipboardWith = (peerId) => {
+  const payload = clipboardPayload();
+  return Boolean(hasClipboardPayload(payload) && sendJson('clipboard', payload, peerId, { silent: true }));
 };
 
-const attachDataChannel = (peerId, channel, context) => {
-  channel.binaryType = 'arraybuffer';
-  channel.bufferedAmountLowThreshold = FILE_CHUNK_SIZE * 4;
+const shareClipboardWithAll = () => {
+  let sent = false;
+  for (const peerId of state.peers.keys()) sent = shareClipboardWith(peerId) || sent;
+  return sent;
+};
 
-  channel.addEventListener('open', () => {
-    appendStatus(dom.fileStatus, `与 ${peerLabel(peerId)} 的数据通道已建立。`);
-    context.ready.resolve();
+const connectDiscovery = () => {
+  const url = new URL(SIGNALING_URL);
+  url.searchParams.set('d', toBase64(JSON.stringify(clientInfo())));
+  const ws = new WebSocket(url);
+  state.ws = ws;
+
+  ws.addEventListener('open', () => {
+    clearInterval(state.pingTimer);
+    state.pingTimer = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) ws.send('');
+    }, 120000);
   });
 
-  channel.addEventListener('close', () => {
-    appendStatus(dom.fileStatus, `与 ${peerLabel(peerId)} 的数据通道已关闭。`);
-    context.ready?.reject?.(new Error('数据通道已关闭。'));
-    cleanupPeer(peerId, { reason: 'datachannel-close' });
-  });
-
-  channel.addEventListener('error', () => {
-    appendStatus(dom.fileStatus, `与 ${peerLabel(peerId)} 的数据通道出现错误。`);
-    context.ready?.reject?.(new Error('数据通道出现错误。'));
-    cleanupPeer(peerId, { reason: 'datachannel-error' });
-  });
-
-  channel.addEventListener('message', (event) => {
-    handleDataChannelMessage(peerId, event.data);
-  });
-};
-
-const preparePeerConnection = async (peerId) => {
-  let context = state.peerConnections.get(peerId);
-  if (!context) {
-    context = createPeerContext(peerId);
-  }
-  if (!context.dataChannel || context.dataChannel.readyState === 'closed') {
-    context.dataChannel = context.pc.createDataChannel('snapsend');
-    attachDataChannel(peerId, context.dataChannel, context);
-  }
-  if (!context.hasLocalDescription) {
-    const offer = await context.pc.createOffer();
-    await context.pc.setLocalDescription(offer);
-    context.hasLocalDescription = true;
-    sendWsMessage('signal', { targetId: peerId, data: { type: 'offer', sdp: offer } });
-  }
-  await context.ready.promise;
-  return context;
-};
-
-const acceptOffer = async (peerId, remoteOffer) => {
-  let context = state.peerConnections.get(peerId);
-  if (!context) {
-    context = createPeerContext(peerId);
-  }
-  if (context.hasLocalDescription && context.pc.currentRemoteDescription) {
-    return;
-  }
-  await context.pc.setRemoteDescription(new RTCSessionDescription(remoteOffer));
-  await flushPendingCandidates(context);
-  const answer = await context.pc.createAnswer();
-  await context.pc.setLocalDescription(answer);
-  context.hasLocalDescription = true;
-  sendWsMessage('signal', { targetId: peerId, data: { type: 'answer', sdp: answer } });
-};
-
-const acceptAnswer = async (peerId, remoteAnswer) => {
-  const context = state.peerConnections.get(peerId);
-  if (!context) return;
-  await context.pc.setRemoteDescription(new RTCSessionDescription(remoteAnswer));
-  await flushPendingCandidates(context);
-};
-
-const addIceCandidate = async (peerId, candidate) => {
-  let context = state.peerConnections.get(peerId);
-  if (!context) {
-    const list = state.orphanCandidates.get(peerId);
-    if (list) {
-      list.push(candidate);
-    } else {
-      state.orphanCandidates.set(peerId, [candidate]);
-    }
-    return;
-  }
-  if (!context.pc.currentRemoteDescription) {
-    context.pendingCandidates.push(candidate);
-    return;
-  }
-  await applyIceCandidate(context, candidate);
-};
-
-const getPeerChannel = (peerId) => state.peerConnections.get(peerId)?.dataChannel || null;
-
-const sendDirectMessageToPeer = (peerId, message) => {
-  const channel = getPeerChannel(peerId);
-  if (!channel || channel.readyState !== 'open') return false;
-  channel.send(JSON.stringify(message));
-  return true;
-};
-
-const failIncomingDirectTransfer = async (peerId, transfer, message) => {
-  if (transfer?.display) {
-    failTransferDisplay(transfer.display, message);
-  }
-  if (transfer) {
-    await cleanupDirectTransferStorage(transfer);
-    state.incomingTransfers.delete(directKey(transfer.meta.id));
-  }
-  sendDirectMessageToPeer(peerId, {
-    type: 'direct-file-error',
-    id: transfer?.meta?.id,
-    message,
-  });
-};
-
-const handleDirectFileOffer = async (peerId, message) => {
-  const { id, name, size, mime, chunkSize } = message;
-  if (!id || !Number.isFinite(size) || size < 0) {
-    sendDirectMessageToPeer(peerId, {
-      type: 'direct-file-reject',
-      id,
-      message: '直连文件元数据无效。',
-    });
-    return;
-  }
-
-  const storage = await createDirectReceiveStorage({
-    transferId: id,
-    peerId,
-    name,
-    size,
-    mime,
-  });
-  if (storage?.rejected) {
-    sendDirectMessageToPeer(peerId, {
-      type: 'direct-file-reject',
-      id,
-      message: storage.message,
-    });
-    return;
-  }
-
-  const display = createTransferDisplay({
-    direction: 'inbound',
-    peerId,
-    name,
-    size,
-  });
-  const hasher = await createSha256();
-  const chunkHasher = await createSha256();
-  const transfer = {
-    meta: {
-      id,
-      name,
-      size,
-      mime,
-      chunkSize,
-    },
-    receivedBytes: 0,
-    nextIndex: 0,
-    pendingChunk: null,
-    display,
-    peerId,
-    mode: 'direct',
-    hasher,
-    chunkHasher,
-    ...storage,
-  };
-  state.incomingTransfers.set(directKey(id), transfer);
-  updateTransferDisplay(display, {
-    percent: 0,
-    status:
-      storage.storage === 'direct-save'
-        ? '局域网直连已建立，正在实时保存到本地文件…'
-        : storage.storage === 'opfs'
-        ? '局域网直连已建立，正在写入浏览器临时文件…'
-        : '局域网直连已建立，正在内存缓冲接收…',
-  });
-  appendStatus(
-    dom.fileStatus,
-    `准备通过局域网直连接收 ${peerLabel(peerId)} 的 "${name || '文件'}"（${humanFileSize(size)}）。`,
-  );
-  sendDirectMessageToPeer(peerId, {
-    type: 'direct-file-accept',
-    id,
-    storage: storage.storage,
-  });
-};
-
-const handleDirectFileChunkMeta = async (peerId, message) => {
-  const transfer = state.incomingTransfers.get(directKey(message.id));
-  if (!transfer || transfer.peerId !== peerId || transfer.mode !== 'direct') {
-    sendDirectMessageToPeer(peerId, {
-      type: 'direct-file-error',
-      id: message.id,
-      message: '接收端没有找到对应的直连传输。',
-    });
-    return;
-  }
-
-  const { index, offset, size, sha256 } = message;
-  if (
-    index !== transfer.nextIndex ||
-    offset !== transfer.receivedBytes ||
-    !Number.isFinite(size) ||
-    size <= 0 ||
-    !sha256
-  ) {
-    await failIncomingDirectTransfer(peerId, transfer, '直连分片顺序或校验信息异常。');
-    return;
-  }
-
-  transfer.pendingChunk = {
-    index,
-    offset,
-    size,
-    sha256,
-  };
-};
-
-const handleDirectBinaryChunk = async (peerId, data) => {
-  const transfer = Array.from(state.incomingTransfers.values()).find(
-    (item) => item.peerId === peerId && item.mode === 'direct' && item.pendingChunk,
-  );
-  if (!transfer) return;
-
-  const chunkMeta = transfer.pendingChunk;
-  transfer.pendingChunk = null;
-  const bytes = new Uint8Array(data);
-  try {
-    if (bytes.byteLength !== chunkMeta.size) {
-      throw new Error('直连分片大小不一致。');
-    }
-    const chunkHash = await hashBytes(transfer.chunkHasher, bytes);
-    if (chunkHash !== chunkMeta.sha256) {
-      throw new Error('直连分片 SHA-256 校验失败。');
-    }
-
-    if (transfer.storage === 'opfs' || transfer.storage === 'direct-save') {
-      await transfer.writable.write(bytes);
-    } else {
-      transfer.chunks.push(data);
-    }
-    transfer.hasher.update(bytes);
-    transfer.receivedBytes += bytes.byteLength;
-    transfer.nextIndex += 1;
-    const percent = transfer.meta.size
-      ? Math.min(100, Math.round((transfer.receivedBytes / transfer.meta.size) * 100))
-      : 100;
-    updateTransferDisplay(transfer.display, {
-      percent,
-      status: `局域网直连接收 ${percent}% · 已校验分片 ${transfer.nextIndex}`,
-    });
-    sendDirectMessageToPeer(peerId, {
-      type: 'direct-file-chunk-ack',
-      id: transfer.meta.id,
-      index: chunkMeta.index,
-      receivedBytes: transfer.receivedBytes,
-      percent,
-    });
-  } catch (error) {
-    await failIncomingDirectTransfer(peerId, transfer, error.message);
-  }
-};
-
-const handleDirectFileComplete = async (peerId, message) => {
-  const transfer = state.incomingTransfers.get(directKey(message.id));
-  if (!transfer || transfer.peerId !== peerId || transfer.mode !== 'direct') {
-    sendDirectMessageToPeer(peerId, {
-      type: 'direct-file-error',
-      id: message.id,
-      message: '接收端没有找到对应的直连传输。',
-    });
-    return;
-  }
-
-  try {
-    if (transfer.pendingChunk) {
-      throw new Error('还有直连分片未写入。');
-    }
-    if (message.totalChunks !== transfer.nextIndex) {
-      throw new Error('直连分片数量不一致。');
-    }
-    if (transfer.receivedBytes !== transfer.meta.size) {
-      throw new Error('直连接收字节数不一致。');
-    }
-    const digest = transfer.hasher.digest('hex');
-    if (digest !== message.sha256) {
-      throw new Error('直连整文件 SHA-256 校验失败。');
-    }
-    await finalizeDirectDownload(transfer, digest);
-    state.incomingTransfers.delete(directKey(message.id));
-    sendDirectMessageToPeer(peerId, {
-      type: 'direct-file-complete-ack',
-      id: message.id,
-      sha256: digest,
-    });
-  } catch (error) {
-    await failIncomingDirectTransfer(peerId, transfer, error.message);
-  }
-};
-
-const handleDirectRemoteError = (peerId, message) => {
-  const error = createFallbackError(message.message || '局域网直连传输失败。');
-  rejectDirectWaitersForTransfer(message.id, error);
-  const trackerInfo = state.transferTrackers.get(message.id);
-  if (trackerInfo) {
-    trackerInfo.tracker.cancelled = true;
-    trackerInfo.tracker.cancelledReason = error.message;
-    state.transferTrackers.delete(message.id);
-  }
-  const transfer = state.incomingTransfers.get(directKey(message.id));
-  if (transfer) {
-    if (transfer.display) {
-      failTransferDisplay(transfer.display, error.message);
-    }
-    cleanupDirectTransferStorage(transfer);
-    state.incomingTransfers.delete(directKey(message.id));
-  }
-  appendStatus(dom.fileStatus, `${peerLabel(peerId)} 的局域网直连失败：${error.message}`);
-};
-
-const handleLegacyDataChannelMessage = (peerId, message) => {
-  if (message.type === 'file-meta') {
-    const key = dataChannelKey(peerId);
-    const display = createTransferDisplay({
-      direction: 'inbound',
-      peerId,
-      name: message.name,
-      size: message.size,
-    });
-    state.incomingTransfers.set(key, {
-      meta: message,
-      chunks: [],
-      receivedBytes: 0,
-      display,
-      peerId,
-      mode: 'webrtc',
-    });
-    updateTransferDisplay(display, {
-      percent: 0,
-      status: `等待来自 ${peerLabel(peerId)} 的数据…`,
-    });
-    appendStatus(
-      dom.fileStatus,
-      `正在接收来自 ${peerLabel(peerId)} 的 "${message.name}"（${humanFileSize(message.size)}）`,
-    );
-  } else if (message.type === 'file-complete') {
-    const key = dataChannelKey(peerId);
-    const transfer = state.incomingTransfers.get(key);
-    if (!transfer) return;
-    if (message.id && transfer.meta.id && message.id !== transfer.meta.id) {
-      return;
-    }
-    const blob = new Blob(transfer.chunks, { type: transfer.meta.mime || 'application/octet-stream' });
-    const filename = transfer.meta.name || '接收文件';
-    const downloadUrl = triggerDownload(blob, filename);
-    const link = document.createElement('a');
-    link.href = downloadUrl;
-    link.download = filename;
-    link.textContent = `重新下载 ${filename}`;
-    link.className = 'download-link';
-    link.rel = 'noopener';
-    const actions = document.createElement('div');
-    actions.className = 'transfer-actions';
-    actions.appendChild(link);
-    if (transfer.display) {
-      completeTransferDisplay(transfer.display, `已接收完成，正在保存 "${filename}"`);
-      transfer.display.entry.appendChild(actions);
-      updateStatusPanelScroll(dom.fileStatus);
-    } else if (dom.fileStatus) {
-      dom.fileStatus.appendChild(actions);
-      updateStatusPanelScroll(dom.fileStatus);
-    }
-    appendStatus(dom.fileStatus, `文件 "${transfer.meta.name}" 已保存并可再次下载。`);
-    state.incomingTransfers.delete(key);
-    setTimeout(() => {
-      URL.revokeObjectURL(downloadUrl);
-      if (link.isConnected) {
-        link.textContent = `${filename} 下载链接已过期`;
-        link.removeAttribute('href');
-        link.classList.add('download-link-disabled');
-      }
-    }, 5 * 60 * 1000);
-  }
-};
-
-const handleDataChannelMessage = (peerId, data) => {
-  if (typeof data === 'string') {
+  ws.addEventListener('message', (event) => {
+    if (!event.data) return;
+    let message;
     try {
-      const message = JSON.parse(data);
-      if (message.type === 'direct-file-offer') {
-        handleDirectFileOffer(peerId, message).catch((error) => {
-          appendStatus(dom.fileStatus, `处理直连请求失败：${error.message}`);
-        });
-      } else if (message.type === 'direct-file-accept' || message.type === 'direct-file-reject') {
-        settleDirectControl(message);
-      } else if (message.type === 'direct-file-chunk') {
-        handleDirectFileChunkMeta(peerId, message).catch((error) => {
-          appendStatus(dom.fileStatus, `处理直连分片信息失败：${error.message}`);
-        });
-      } else if (message.type === 'direct-file-chunk-ack') {
-        settleDirectChunkAck(message);
-      } else if (message.type === 'direct-file-complete') {
-        handleDirectFileComplete(peerId, message).catch((error) => {
-          appendStatus(dom.fileStatus, `完成直连传输失败：${error.message}`);
-        });
-      } else if (message.type === 'direct-file-complete-ack') {
-        settleDirectControl(message);
-      } else if (message.type === 'direct-file-error') {
-        handleDirectRemoteError(peerId, message);
-      } else {
-        handleLegacyDataChannelMessage(peerId, message);
-      }
+      message = JSON.parse(event.data);
     } catch {
-      /* ignored */
-    }
-  } else if (data instanceof ArrayBuffer) {
-    const hasDirectPendingChunk = Array.from(state.incomingTransfers.values()).some(
-      (item) => item.peerId === peerId && item.mode === 'direct' && item.pendingChunk,
-    );
-    if (hasDirectPendingChunk) {
-      handleDirectBinaryChunk(peerId, data).catch((error) => {
-        appendStatus(dom.fileStatus, `写入直连分片失败：${error.message}`);
-      });
       return;
     }
-    const key = dataChannelKey(peerId);
-    const transfer = state.incomingTransfers.get(key);
-    if (!transfer) return;
-    transfer.chunks.push(data);
-    transfer.receivedBytes += data.byteLength;
-    const totalSize = transfer.meta.size || 0;
-    const percent = totalSize
-      ? Math.min(100, Math.round((transfer.receivedBytes / totalSize) * 100))
-      : 0;
-    if (transfer.display) {
-      updateTransferDisplay(transfer.display, {
-        percent,
-        status: `已接收 ${percent}%`,
-      });
+    if (message.type === 'HELLO') {
+      state.id = message.client?.id || '';
+      replacePeers(message.peers);
+      shareClipboardWithAll();
+    } else if (message.type === 'JOIN') {
+      upsertPeer(message.peer);
+      renderPeers();
+      shareClipboardWith(message.peer?.id);
+    } else if (message.type === 'UPDATE') {
+      upsertPeer(message.peer);
+      renderPeers();
+    } else if (message.type === 'LEFT') {
+      state.peers.delete(message.peerId);
+      if (state.activePeerId === message.peerId) state.activePeerId = '';
+      closeRtc(message.peerId);
+      renderPeers();
+    } else if (message.type === 'RELAY') {
+      upsertPeer(message.peer);
+      handleJsonMessage(message.peer.id, message.payload);
+    } else if (message.type === 'ERROR') {
+      showToast(`信令服务错误：${message.code || 'unknown'}`);
     }
-  }
+  });
+
+  ws.addEventListener('close', () => {
+    clearInterval(state.pingTimer);
+    for (const peerId of [...state.rtc.keys()]) closeRtc(peerId);
+    setTimeout(connectDiscovery, 1500);
+  });
 };
 
-const waitForSendBuffer = (channel) =>
-  new Promise((resolve) => {
-    if (channel.bufferedAmount < channel.bufferedAmountLowThreshold) {
-      resolve();
-      return;
-    }
-    const handler = () => {
-      channel.removeEventListener('bufferedamountlow', handler);
-      resolve();
-    };
-    channel.addEventListener('bufferedamountlow', handler);
-  });
-
-const createServerTransfer = async (peerId, file) => {
-  const response = await fetch('/api/transfers', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      senderId: state.selfId,
-      targetId: peerId,
-      name: file.name,
-      size: file.size,
-      mime: file.type || 'application/octet-stream',
-      chunkSize: HTTP_FILE_CHUNK_SIZE,
-    }),
-  });
-  return readJsonResponse(response);
-};
-
-const uploadTransferChunk = async ({
-  transferId,
-  uploadToken,
-  index,
-  offset,
-  chunk,
-  chunkHash,
-}) => {
-  const response = await fetch(
-    `/api/transfers/${encodeURIComponent(transferId)}/chunks/${index}`,
-    {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/octet-stream',
-        'X-Upload-Token': uploadToken,
-        'X-Chunk-Offset': String(offset),
-        'X-Chunk-Size': String(chunk.byteLength),
-        'X-Chunk-SHA256': chunkHash,
-      },
-      body: chunk,
-    },
-  );
-  return readJsonResponse(response);
-};
-
-const completeServerTransfer = async ({ transferId, uploadToken, sha256, totalChunks }) => {
-  const response = await fetch(`/api/transfers/${encodeURIComponent(transferId)}/complete`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      uploadToken,
-      sha256,
-      totalChunks,
-    }),
-  });
-  return readJsonResponse(response);
-};
-
-const cancelServerTransfer = async (transferId, uploadToken) => {
-  if (!transferId || !uploadToken) return;
-  await fetch(`/api/transfers/${encodeURIComponent(transferId)}`, {
-    method: 'DELETE',
-    headers: {
-      'X-Upload-Token': uploadToken,
-    },
-  }).catch(() => {});
-};
-
-const sendFileViaDirect = async (peerId, file, display, tracker) => {
-  if (!('RTCPeerConnection' in window)) {
-    throw createFallbackError('当前浏览器不支持局域网直连。');
-  }
-
-  updateTransferDisplay(display, {
-    percent: 0,
-    status: '正在尝试局域网直连…',
-  });
-
-  const context = await withTimeout(
-    preparePeerConnection(peerId),
-    DIRECT_CONNECT_TIMEOUT,
-    createFallbackError('局域网直连握手超时。'),
-  );
-  const channel = context.dataChannel;
-  if (!channel || channel.readyState !== 'open') {
-    throw createFallbackError('局域网直连通道不可用。');
-  }
-
-  const transferId = `direct-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
-  tracker.mode = 'direct';
-  tracker.transferId = transferId;
-  tracker.cancelled = false;
-  tracker.cancelledReason = undefined;
-  state.outgoingTransfers.set(peerId, tracker);
-  state.transferTrackers.set(transferId, { tracker, peerId });
-
-  const offerResponsePromise = waitForDirectControl(
-    transferId,
-    ['direct-file-accept', 'direct-file-reject'],
-    peerId,
-  );
-  sendDataChannelMessage(channel, {
-    type: 'direct-file-offer',
-    id: transferId,
-    name: file.name,
-    size: file.size,
-    mime: file.type || 'application/octet-stream',
-    chunkSize: DIRECT_FILE_CHUNK_SIZE,
-  });
-
-  const response = await offerResponsePromise;
-  if (response.type === 'direct-file-reject') {
-    throw createFallbackError(response.message || '接收端拒绝局域网直连。');
-  }
-
-  updateTransferDisplay(display, {
-    percent: 0,
-    status:
-      response.storage === 'direct-save'
-        ? '局域网直连已建立，正在实时写入接收端文件…'
-        : response.storage === 'opfs'
-        ? '局域网直连已建立，正在向接收端临时文件写入…'
-        : '局域网直连已建立，正在发送…',
-  });
-  appendStatus(dom.fileStatus, `已与 ${peerLabel(peerId)} 建立局域网直连，开始发送 "${file.name}"。`);
-
-  const fileHasher = await createSha256();
-  const chunkHasher = await createSha256();
-  let offset = 0;
-  let chunkIndex = 0;
-  const totalChunks = file.size ? Math.ceil(file.size / DIRECT_FILE_CHUNK_SIZE) : 0;
-
-  while (offset < file.size) {
-    const slice = file.slice(offset, offset + DIRECT_FILE_CHUNK_SIZE);
-    // eslint-disable-next-line no-await-in-loop
-    const buffer = await slice.arrayBuffer();
-    const chunk = new Uint8Array(buffer);
-    fileHasher.update(chunk);
-    // eslint-disable-next-line no-await-in-loop
-    const chunkHash = await hashBytes(chunkHasher, chunk);
-    const ackPromise = waitForDirectChunkAck(transferId, chunkIndex, peerId);
-    sendDataChannelMessage(channel, {
-      type: 'direct-file-chunk',
-      id: transferId,
-      index: chunkIndex,
-      offset,
-      size: chunk.byteLength,
-      sha256: chunkHash,
-    });
-    channel.send(buffer);
-    // eslint-disable-next-line no-await-in-loop
-    await waitForSendBuffer(channel);
-    // eslint-disable-next-line no-await-in-loop
-    await ackPromise;
-
-    offset += chunk.byteLength;
-    chunkIndex += 1;
-    const percent = file.size ? Math.min(100, Math.round((offset / file.size) * 100)) : 100;
-    updateTransferDisplay(display, {
-      percent,
-      status: `局域网直连发送 ${percent}% · 已确认分片 ${chunkIndex}/${totalChunks}`,
-    });
-    if (tracker.cancelled) {
-      throw createFallbackError(tracker.cancelledReason || '局域网直连已中止。');
-    }
-    if (chunkIndex % 4 === 0) {
-      // eslint-disable-next-line no-await-in-loop
-      await microDelay();
-    }
-  }
-
-  const fileHash = fileHasher.digest('hex');
-  const completeAckPromise = waitForDirectControl(
-    transferId,
-    'direct-file-complete-ack',
-    peerId,
-    DIRECT_CHUNK_ACK_TIMEOUT,
-  );
-  sendDataChannelMessage(channel, {
-    type: 'direct-file-complete',
-    id: transferId,
-    sha256: fileHash,
-    totalChunks,
-  });
-  const completeAck = await completeAckPromise;
-  completeTransferDisplay(
-    display,
-    `已通过局域网直连发送，SHA-256：${shortHash(completeAck.sha256 || fileHash)}`,
-  );
-  appendStatus(dom.fileStatus, `局域网直连发送完成：${file.name}。`);
-  state.transferTrackers.delete(transferId);
-};
-
-const sendFileViaHttpRelay = async (peerId, file, display, tracker) => {
-  const socket = state.ws;
-  if (!socket || socket.readyState !== WebSocket.OPEN) {
-    const message = '无法连接服务器进行文件中转。';
-    appendStatus(dom.fileStatus, message);
-    if (display) {
-      failTransferDisplay(display, message);
-    }
-    return;
-  }
-  if (tracker.transferId) {
-    state.transferTrackers.delete(tracker.transferId);
-  }
-  updateTransferDisplay(display, {
-    percent: 0,
-    status: '正在创建安全传输会话…',
-  });
-
-  const session = await createServerTransfer(peerId, file);
-  const transferId = session.transferId;
-  const uploadToken = session.uploadToken;
-  const chunkSize = session.chunkSize || HTTP_FILE_CHUNK_SIZE;
-  tracker.mode = 'http-relay';
-  tracker.transferId = transferId;
-  tracker.uploadToken = uploadToken;
-  tracker.cancelled = false;
-  tracker.cancelledReason = undefined;
-  state.outgoingTransfers.set(peerId, tracker);
-  state.transferTrackers.set(transferId, { tracker, peerId });
-  updateTransferDisplay(display, {
-    percent: 0,
-    status: `正在分片上传「${file.name || '文件'}」…`,
-  });
-  appendStatus(dom.fileStatus, `开始向 ${peerLabel(peerId)} 上传 "${file.name}"，分片大小 ${humanFileSize(chunkSize)}。`);
-
-  const fileHasher = await createSha256();
-  const chunkHasher = await createSha256();
-  let offset = 0;
-  let chunkIndex = 0;
-  const totalChunks = file.size ? Math.ceil(file.size / chunkSize) : 0;
-
-  while (offset < file.size) {
-    const slice = file.slice(offset, offset + chunkSize);
-    // eslint-disable-next-line no-await-in-loop
-    const buffer = await slice.arrayBuffer();
-    const chunk = new Uint8Array(buffer);
-    fileHasher.update(chunk);
-    // eslint-disable-next-line no-await-in-loop
-    const chunkHash = await hashBytes(chunkHasher, chunk);
-    // eslint-disable-next-line no-await-in-loop
-    await uploadTransferChunk({
-      transferId,
-      uploadToken,
-      index: chunkIndex,
-      offset,
-      chunk,
-      chunkHash,
-    });
-
-    offset += chunk.byteLength;
-    chunkIndex += 1;
-    const percent = file.size ? Math.min(100, Math.round((offset / file.size) * 100)) : 100;
-    updateTransferDisplay(display, {
-      percent,
-      status: `已上传 ${percent}% · 已校验分片 ${chunkIndex}/${totalChunks}`,
-    });
-
-    if (tracker.cancelled) {
-      throw new Error(tracker.cancelledReason || '对方已取消接收。');
-    }
-    if (chunkIndex % 2 === 0) {
-      // eslint-disable-next-line no-await-in-loop
-      await microDelay();
-    }
-  }
-
-  const fileHash = fileHasher.digest('hex');
-  updateTransferDisplay(display, {
-    percent: 100,
-    status: '上传完成，服务器正在校验整文件…',
-  });
-  const completion = await completeServerTransfer({
-    transferId,
-    uploadToken,
-    sha256: fileHash,
-    totalChunks,
-  });
-  appendStatus(
-    dom.fileStatus,
-    `服务器已校验 "${file.name}"，SHA-256：${shortHash(completion.sha256 || fileHash)}。`,
-  );
-  completeTransferDisplay(display, `已完成并校验 SHA-256：${shortHash(completion.sha256 || fileHash)}`);
-  state.transferTrackers.delete(transferId);
-};
-
-const sendFile = async (peerId, file) => {
-  const display = createTransferDisplay({
-    direction: 'outbound',
-    peerId,
-    name: file.name,
-    size: file.size,
-  });
-  if (display) {
-    updateTransferDisplay(display, { percent: 0, status: '准备局域网直连…' });
-  }
-  const tracker = { display, fileName: file.name, mode: 'direct', cancelled: false, transferId: undefined };
-  state.outgoingTransfers.set(peerId, tracker);
-
-  try {
-    try {
-      await sendFileViaDirect(peerId, file, display, tracker);
-    } catch (directError) {
-      const directReason =
-        tracker.cancelled === true
-          ? tracker.cancelledReason || directError.message
-          : directError.message;
-      if (tracker.transferId) {
-        const channel = getPeerChannel(peerId);
-        if (channel?.readyState === 'open') {
-          channel.send(JSON.stringify({
-            type: 'direct-file-error',
-            id: tracker.transferId,
-            message: '发送端切换到服务器中转。',
-          }));
-        }
-        rejectDirectWaitersForTransfer(tracker.transferId, createFallbackError(directReason));
-        state.transferTrackers.delete(tracker.transferId);
-        tracker.transferId = undefined;
-      }
-      tracker.cancelled = false;
-      tracker.cancelledReason = undefined;
-      appendStatus(dom.fileStatus, `局域网直连不可用，切换到服务器中转：${directReason}`);
-      updateTransferDisplay(display, {
-        percent: 0,
-        status: '局域网直连不可用，正在切换到服务器中转…',
-      });
-      await sendFileViaHttpRelay(peerId, file, display, tracker);
-    }
-  } catch (error) {
-    const reason =
-      tracker.cancelled === true
-        ? tracker.cancelledReason || error.message
-        : error.message;
-    await cancelServerTransfer(tracker.transferId, tracker.uploadToken);
-    if (tracker.transferId) {
-      state.transferTrackers.delete(tracker.transferId);
-      tracker.transferId = undefined;
-    }
-    if (display) {
-      failTransferDisplay(display, `服务器中转失败：${reason}`);
-    }
-    appendStatus(dom.fileStatus, `服务器中转发送失败：${reason || '请稍后重试。'}`);
-    tracker.cancelled = false;
-    tracker.cancelledReason = undefined;
-  } finally {
-    if (tracker.transferId) {
-      state.transferTrackers.delete(tracker.transferId);
-      tracker.transferId = undefined;
-    }
-    state.outgoingTransfers.delete(peerId);
-  }
-};
-
-const requestClipboardWrite = async (
-  descriptor,
-  { successMessage, failureMessage } = {},
-) => {
-  const success =
-    typeof successMessage === 'string'
-      ? successMessage
-      : '已将收到的内容写入本地剪贴板';
-  const failure =
-    typeof failureMessage === 'string'
-      ? failureMessage
-      : '写入剪贴板失败';
-  try {
-    const result = await writeClipboardData(descriptor);
-    let note = '';
-    if (result.mode === 'rich' && !result.fallback) {
-      note = '（保留原始格式）';
-    } else if (result.mode === 'text' && result.fallback) {
-      note = '（浏览器仅允许纯文本）';
-    }
-    appendStatus(dom.clipboardStatus, `${success}${note}。`);
-    return result;
-  } catch (error) {
-    appendStatus(dom.clipboardStatus, `${failure}：${error.message}`);
-    return null;
-  }
-};
-
-const sendClipboardContent = (descriptor, targetId) => {
-  const normalized = normalizeClipboardDescriptor(descriptor);
-  if (!hasClipboardData(normalized)) {
-    appendStatus(dom.clipboardStatus, '同步前请先提供剪贴板内容。');
-    return;
-  }
-  const payload = { ...normalized };
-  if (targetId) {
-    payload.targetId = targetId;
-  }
-  sendWsMessage('clipboard-update', payload);
-  const hint = clipboardFormatHint(payload);
-  appendStatus(dom.clipboardStatus, `已发送剪贴板内容${hint}。`);
-  state.lastClipboardPayload = payload;
-  state.clipboardTextLinkedPayload = payload;
-};
-
-const copyDescriptorWithExecCommand = ({ text, html }) => {
-  const selection = document.getSelection();
-  const previousRanges = [];
-  if (selection && selection.rangeCount) {
-    for (let i = 0; i < selection.rangeCount; i += 1) {
-      previousRanges.push(selection.getRangeAt(i));
-    }
-  }
-
-  const container = document.createElement('div');
-  container.contentEditable = 'true';
-  container.style.position = 'fixed';
-  container.style.pointerEvents = 'none';
-  container.style.opacity = '0';
-  container.style.bottom = '0';
-  container.style.right = '0';
-  container.style.whiteSpace = 'pre-wrap';
-  if (html) {
-    container.innerHTML = html;
+const reconnectDiscovery = () => {
+  state.peers.clear();
+  state.activePeerId = '';
+  clearInterval(state.pingTimer);
+  for (const peerId of [...state.rtc.keys()]) closeRtc(peerId);
+  renderPeers();
+  if (state.ws?.readyState === WebSocket.OPEN || state.ws?.readyState === WebSocket.CONNECTING) {
+    state.ws.close();
   } else {
-    container.textContent = text || '';
+    connectDiscovery();
   }
-  document.body.appendChild(container);
-
-  const range = document.createRange();
-  range.selectNodeContents(container);
-
-  if (selection) {
-    selection.removeAllRanges();
-    selection.addRange(range);
-  }
-
-  let success = false;
-  try {
-    success = document.execCommand('copy');
-  } catch {
-    success = false;
-  }
-
-  if (selection) {
-    selection.removeAllRanges();
-    previousRanges.forEach((r) => selection.addRange(r));
-  }
-
-  container.remove();
-  return success;
 };
 
-dom.saveDisplayName.addEventListener('click', () => {
-  const name = dom.displayName.value.trim();
-  if (!name) return;
-  state.displayName = name;
-  dom.currentDisplayName.textContent = name;
-  persistDisplayName(name);
-  sendWsMessage('register', { displayName: name });
-  state.hasSentInitialRegister = true;
-});
-
-dom.sendFileBtn.addEventListener('click', () => {
-  const peerId = dom.fileTarget.value;
-  const file = dom.fileInput.files?.[0];
-  if (!peerId) {
-    appendStatus(dom.fileStatus, '请选择要发送的目标设备。');
-    return;
-  }
-  if (!file) {
-    appendStatus(dom.fileStatus, '请选择要发送的文件。');
-    return;
-  }
-  sendFile(peerId, file)
-    .then(() => {
-      if (dom.fileInput) {
-        dom.fileInput.value = '';
-      }
-    })
-    .catch((error) => {
-      appendStatus(dom.fileStatus, `文件传输失败：${error.message}`);
-    });
-});
-
-dom.pushClipboardBtn.addEventListener('click', async () => {
-  const manualText = dom.clipboardText.value;
-  if (manualText) {
-    const descriptor = normalizeClipboardDescriptor({ content: manualText });
-    state.clipboardTextLinkedPayload = descriptor;
-    sendClipboardContent(descriptor, dom.clipboardTarget.value);
-    return;
-  }
-
-  const manualFallback = async () => {
-    const descriptor = await openClipboardOverlay({
-      confirmLabel: '推送此剪贴板',
-      message: '请在下方区域按 Ctrl+V / ⌘V 粘贴要同步的内容，我们会尽可能保留格式。',
-    });
-    if (!descriptor) {
-      return false;
-    }
-    if (!hasClipboardData(descriptor)) {
-      appendStatus(dom.clipboardStatus, '剪贴板为空，无内容可同步。');
-      return false;
-    }
-    dom.clipboardText.value = descriptor.content || '';
-    state.clipboardTextLinkedPayload = descriptor;
-    sendClipboardContent(descriptor, dom.clipboardTarget.value);
-    return true;
-  };
-
+const savePin = (nextPin) => {
+  const next = nextPin.trim();
+  if (next === state.pin) return;
+  state.pin = next;
+  dom.pinValue.textContent = state.pin || '未设置';
   try {
-    const { descriptor, mode } = await readSystemClipboardDescriptor();
-    if (!descriptor || !hasClipboardData(descriptor)) {
-      await manualFallback();
-      return;
-    }
-    dom.clipboardText.value = descriptor.content || '';
-    state.clipboardTextLinkedPayload = descriptor;
-    const hint = clipboardFormatHint(descriptor);
-    if ((mode === 'rich' || mode === 'command' || mode === 'manual') && hint) {
-      appendStatus(dom.clipboardStatus, `已读取系统剪贴板${hint}。`);
-    }
-    sendClipboardContent(descriptor, dom.clipboardTarget.value);
-  } catch (error) {
-    appendStatus(
-      dom.clipboardStatus,
-      `读取剪贴板失败：${error.message || '请授予权限或手动粘贴内容。'}`,
-    );
-    await manualFallback();
-  }
-});
-
-dom.readAndBroadcastClipboardBtn.addEventListener('click', async () => {
-  const manualFallback = async () => {
-    const descriptor = await openClipboardOverlay({
-      confirmLabel: '广播此内容',
-      message: '无法直接读取剪贴板，请在下方区域按 Ctrl+V / ⌘V 粘贴需要广播的内容，我们会保留格式。',
-    });
-    if (!descriptor) {
-      return false;
-    }
-    if (!hasClipboardData(descriptor)) {
-      appendStatus(dom.clipboardStatus, '剪贴板为空，无内容可广播。');
-      return false;
-    }
-    dom.clipboardText.value = descriptor.content || '';
-    state.clipboardTextLinkedPayload = descriptor;
-    sendClipboardContent(descriptor, dom.clipboardTarget.value);
-    return true;
-  };
-
-  try {
-    const { descriptor } = await readSystemClipboardDescriptor();
-    if (!descriptor || !hasClipboardData(descriptor)) {
-      await manualFallback();
-      return;
-    }
-    dom.clipboardText.value = descriptor.content || '';
-    state.clipboardTextLinkedPayload = descriptor;
-    sendClipboardContent(descriptor, dom.clipboardTarget.value);
-  } catch (error) {
-    appendStatus(
-      dom.clipboardStatus,
-      `读取剪贴板失败：${error.message || '请授权后重试。'}`,
-    );
-    await manualFallback();
-  }
-});
-
-dom.copyClipboardBtn.addEventListener('click', async () => {
-  const linkedPayload = hasClipboardData(state.clipboardTextLinkedPayload)
-    ? state.clipboardTextLinkedPayload
-    : null;
-  const manualText = dom.clipboardText.value;
-  const descriptor = linkedPayload || (manualText ? { content: manualText } : null);
-
-  if (!descriptor) {
-    appendStatus(dom.clipboardStatus, '复制前请先提供剪贴板内容。');
-    return;
-  }
-
-  const text = extractPlainText(descriptor, manualText);
-  const html = descriptorHasHtml(descriptor) ? getDescriptorHtml(descriptor) : '';
-  const prefersRichCopy = Boolean(html);
-
-  let copied = false;
-  let writeError = null;
-
-  if (navigator.clipboard) {
-    try {
-      const result = await writeClipboardData(descriptor, {
-        allowTextFallback: !prefersRichCopy,
-      });
-      let note = '';
-      if (result.mode === 'rich' && !result.fallback) {
-        note = '（保留原始格式）';
-      } else if (result.mode === 'text' && result.fallback) {
-        note = '（浏览器仅允许纯文本）';
-      }
-      appendStatus(dom.clipboardStatus, `已将内容复制到本地剪贴板${note}。`);
-      copied = true;
-    } catch (error) {
-      writeError = error;
-    }
-  }
-
-  if (copied) {
-    return;
-  }
-
-  const fallbackSuccess = copyDescriptorWithExecCommand({ text, html });
-  if (fallbackSuccess) {
-    appendStatus(dom.clipboardStatus, '已通过浏览器复制命令复制剪贴板内容。');
-    return;
-  }
-
-  const reason = writeError?.message || '浏览器拒绝复制操作。';
-  appendStatus(dom.clipboardStatus, `复制失败，请手动选择文本并复制：${reason}`);
-});
-
-statusPanels.forEach((panel) => {
-  panel.addEventListener('toggle', () => {
-    if (panel.open) {
-      panel.classList.remove('has-updates');
-      const log = panel.querySelector('.status-log');
-      if (log) {
-        log.scrollTop = log.scrollHeight;
-      }
-    }
-  });
-});
-
-dom.clipboardText.addEventListener('input', () => {
-  state.clipboardTextLinkedPayload = null;
-});
-
-dom.chatForm.addEventListener('submit', (event) => {
-  event.preventDefault();
-  const message = dom.chatInput.value.trim();
-  if (!message) return;
-  const payload = { message };
-  if (dom.chatTarget.value) {
-    payload.targetId = dom.chatTarget.value;
-  }
-  sendWsMessage('text-message', payload);
-  addMessage({
-    from: state.selfId,
-    displayName: state.displayName,
-    message,
-    timestamp: Date.now(),
-  });
-  dom.chatInput.value = '';
-  dom.chatInput.focus();
-});
-
-const handleSocketMessage = async (event) => {
-  let data;
-  try {
-    data = JSON.parse(event.data);
+    if (state.pin) localStorage.setItem('landu:pin', state.pin);
+    else localStorage.removeItem('landu:pin');
   } catch {
+    /* ignored */
+  }
+  reconnectDiscovery();
+};
+
+const openPinDialog = () => {
+  dom.pinInput.value = state.pin;
+  if (typeof dom.pinDialog.showModal === 'function') dom.pinDialog.showModal();
+  else dom.pinDialog.setAttribute('open', '');
+  dom.pinInput.focus();
+};
+
+const sendJson = (type, payload = {}, peerId = targetPeerId(), { silent = false, relay = false } = {}) => {
+  if (peerId && state.ws?.readyState === WebSocket.OPEN) {
+    state.activePeerId = peerId;
+    const channel = state.rtc.get(peerId)?.channel;
+    if (!relay && channel?.readyState === 'open') {
+      try {
+        channel.send(JSON.stringify({ type, payload }));
+        return true;
+      } catch {
+        closeRtc(peerId);
+      }
+    }
+    signalSend({ type: 'RELAY', target: peerId, payload: { type, payload } });
+    return true;
+  }
+  if (!silent) showToast('请先发现一台设备。');
+  return false;
+};
+
+const humanFileSize = (bytes) => {
+  if (!Number.isFinite(bytes)) return '';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let value = bytes;
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index += 1;
+  }
+  return `${value.toFixed(index === 0 || value >= 10 ? 0 : 1)} ${units[index]}`;
+};
+
+const addListItem = (title, detail, container = dom.fileList) => {
+  const item = document.createElement('div');
+  item.className = 'item';
+  const heading = document.createElement('strong');
+  heading.textContent = title;
+  const body = document.createElement('span');
+  body.textContent = detail;
+  item.append(heading, body);
+  container.prepend(item);
+  return item;
+};
+
+const updateSendProgress = (sent, total) => {
+  const percent = total ? Math.min(100, Math.round((sent / total) * 100)) : 100;
+  dom.transferTotalText.textContent = `${humanFileSize(sent)} / ${humanFileSize(total)}`;
+  dom.transferTotalProgress.value = percent;
+  dom.transferFileProgress.value = percent;
+};
+
+const showSendProgress = (file) => {
+  clearTimeout(showSendProgress.timer);
+  dom.transferTitle.textContent = '发送文件中...';
+  dom.transferFileName.textContent = file.name;
+  dom.transferFileSize.textContent = humanFileSize(file.size);
+  updateSendProgress(0, file.size);
+  dom.transferModal.hidden = false;
+};
+
+const finishSendProgress = (title) => {
+  dom.transferTitle.textContent = title;
+  showSendProgress.timer = setTimeout(() => {
+    dom.transferModal.hidden = true;
+  }, 700);
+};
+
+const waitForFileAck = (id) => {
+  let waiter;
+  const promise = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('接收端校验超时')), 20000);
+    waiter = { resolve, reject, timer };
+  });
+  state.outgoingFileAcks.set(id, waiter);
+  return promise.finally(() => {
+    clearTimeout(waiter.timer);
+    state.outgoingFileAcks.delete(id);
+  });
+};
+
+const handleFileAck = ({ id, ok, message }) => {
+  const waiter = state.outgoingFileAcks.get(id);
+  if (!waiter) return;
+  if (ok) waiter.resolve(message || '接收端校验通过');
+  else waiter.reject(new Error(message || '接收端校验失败'));
+};
+
+const sendFileObject = async (file, peerId = targetPeerId()) => {
+  if (!file) {
+    showToast('请先选择文件。');
     return;
   }
-  const { type, payload } = data;
-  if (!SILENCED_INBOUND_TYPES.has(type)) {
-    const kind = typeof type === 'string' && type.endsWith('error') ? 'error' : type === 'error' ? 'error' : 'inbound';
-    appendActivity(kind, describeInbound(type, payload));
+  if (!peerId || state.ws?.readyState !== WebSocket.OPEN) {
+    showToast('请先发现一台设备。');
+    return;
   }
+  const id = randomId();
+  const ackPromise = waitForFileAck(id).catch((error) => error);
+  showSendProgress(file);
+  dom.transferTitle.textContent = '建立 WebRTC 连接...';
+  const channel = await openRtcChannel(peerId).catch(() => null);
+  const viaRtc = channel?.readyState === 'open';
+  dom.transferTitle.textContent = '发送文件中...';
+  const sendPacket = async (type, payload, binary) => {
+    if (viaRtc) {
+      await sendRtcPacket(channel, { type, payload });
+      if (binary) await sendRtcBinary(channel, binary);
+      return true;
+    }
+    return sendJson(type, payload, peerId, { silent: true, relay: true });
+  };
+  const entry = addListItem(`发送 ${file.name}`, `0% · ${humanFileSize(file.size)} · ${viaRtc ? 'WebRTC' : '本地服务'}`);
+  let sent = 0;
+  try {
+    if (!(await sendPacket('file-meta', { id, name: file.name, size: file.size, mime: file.type || 'application/octet-stream', chunkSize: FILE_CHUNK_SIZE }))) {
+      throw new Error('连接已断开');
+    }
+    let index = 0;
+    for (let offset = 0; offset < file.size; offset += FILE_CHUNK_SIZE) {
+      const chunk = await file.slice(offset, offset + FILE_CHUNK_SIZE).arrayBuffer();
+      const chunkMeta = { id, index, checksum: checksum(chunk) };
+      const payload = viaRtc ? chunkMeta : { ...chunkMeta, data: bufferToBase64(chunk) };
+      if (!(await sendPacket(viaRtc ? 'file-chunk-meta' : 'file-chunk', payload, chunk))) throw new Error('连接已断开');
+      sent += chunk.byteLength;
+      index += 1;
+      updateSendProgress(sent, file.size);
+      entry.lastChild.textContent = `${Math.round((sent / file.size) * 100)}% · ${humanFileSize(file.size)} · ${viaRtc ? 'WebRTC' : '本地服务'}`;
+    }
+    updateSendProgress(file.size, file.size);
+    if (!(await sendPacket('file-complete', { id, chunks: Math.ceil(file.size / FILE_CHUNK_SIZE) }))) throw new Error('连接已断开');
+    dom.transferTitle.textContent = '等待接收端校验...';
+    const ack = await ackPromise;
+    if (ack instanceof Error) throw ack;
+    entry.lastChild.textContent = `已验证 · ${humanFileSize(file.size)} · ${viaRtc ? 'WebRTC' : '本地服务'}`;
+    finishSendProgress('发送完成');
+  } catch (error) {
+    const waiter = state.outgoingFileAcks.get(id);
+    if (waiter) waiter.reject(error);
+    finishSendProgress('发送失败');
+    throw error;
+  }
+};
+
+const sendFile = async () => {
+  try {
+    await sendFileObject(dom.fileInput.files?.[0]);
+  } finally {
+    dom.fileInput.value = '';
+  }
+};
+
+const receiveFileMeta = (peerId, { id, name, size, mime, chunkSize }) => {
+  const entry = addListItem(`接收 ${name || '文件'}`, `0% · ${humanFileSize(size)}`);
+  state.incomingFiles.set(id, {
+    id,
+    peerId,
+    name: name || '接收文件',
+    size,
+    mime: mime || 'application/octet-stream',
+    chunkSize: chunkSize || FILE_CHUNK_SIZE,
+    received: 0,
+    nextIndex: 0,
+    chunks: [],
+    entry,
+  });
+};
+
+const failIncomingFile = (transfer, message) => {
+  if (!transfer) return;
+  transfer.entry.lastChild.textContent = message;
+  state.incomingFiles.delete(transfer.id);
+  sendJson('file-ack', { id: transfer.id, ok: false, message }, transfer.peerId, { silent: true });
+  showToast(message);
+};
+
+const receiveFileChunk = (peerId, { id, index, data, checksum: expectedChecksum }) => {
+  const transfer = state.incomingFiles.get(id);
+  if (!transfer) return;
+  if (index !== transfer.nextIndex) {
+    failIncomingFile(transfer, '文件分片顺序错误，已取消接收。');
+    return;
+  }
+  const chunk = data instanceof ArrayBuffer ? data : base64ToBuffer(data);
+  if (expectedChecksum && checksum(chunk) !== expectedChecksum) {
+    failIncomingFile(transfer, '文件分片校验失败，已取消接收。');
+    return;
+  }
+  transfer.chunks.push(chunk);
+  transfer.received += chunk.byteLength;
+  transfer.nextIndex += 1;
+  const percent = transfer.size ? Math.min(100, Math.round((transfer.received / transfer.size) * 100)) : 0;
+  transfer.entry.lastChild.textContent = `${percent}% · ${humanFileSize(transfer.size)}`;
+};
+
+const receiveRtcBinaryChunk = async (peerId, data) => {
+  const pending = state.pendingRtcChunks.get(peerId);
+  if (!pending) return;
+  state.pendingRtcChunks.delete(peerId);
+  const buffer = data instanceof Blob ? await data.arrayBuffer() : data;
+  receiveFileChunk(peerId, { ...pending, data: buffer });
+};
+
+const completeFile = (peerId, { id, chunks }) => {
+  const transfer = state.incomingFiles.get(id);
+  if (!transfer) return;
+  if (transfer.received !== transfer.size || (Number.isFinite(chunks) && transfer.chunks.length !== chunks)) {
+    failIncomingFile(transfer, '文件大小校验失败，已取消接收。');
+    return;
+  }
+  const blob = new Blob(transfer.chunks, { type: transfer.mime });
+  const url = URL.createObjectURL(blob);
+  transfer.entry.lastChild.textContent = `已接收 · ${humanFileSize(transfer.size)}`;
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = transfer.name;
+  link.textContent = `下载 ${transfer.name} · ${humanFileSize(transfer.size)}`;
+  transfer.entry.append(link);
+  link.click();
+  sendJson('file-ack', { id, ok: true, message: '接收端校验通过' }, peerId, { silent: true });
+  setTimeout(() => URL.revokeObjectURL(url), 5 * 60 * 1000);
+  state.incomingFiles.delete(id);
+};
+
+const targetPeerId = () =>
+  (state.activePeerId && state.peers.has(state.activePeerId) ? state.activePeerId : '') ||
+  state.peers.keys().next().value ||
+  '';
+
+const bufferToBase64 = (buffer) => {
+  let binary = '';
+  for (const byte of new Uint8Array(buffer)) binary += String.fromCharCode(byte);
+  return btoa(binary);
+};
+
+const base64ToBuffer = (base64) => {
+  const binary = atob(base64 || '');
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+};
+
+const extensionForMime = (mime = '') =>
+  ({
+    'image/png': '.png',
+    'image/jpeg': '.jpg',
+    'image/gif': '.gif',
+    'image/webp': '.webp',
+    'application/pdf': '.pdf',
+  })[mime] || '';
+
+const namedClipboardFile = (blob, index) => {
+  if (!blob) return null;
+  if (blob instanceof File && blob.name) return blob;
+  return new File([blob], `clipboard-${Date.now()}-${index + 1}${extensionForMime(blob.type)}`, { type: blob.type || 'application/octet-stream' });
+};
+
+const escapeAttribute = (value = '') => value.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+
+const blobToDataUrl = (blob) =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener('load', () => resolve(reader.result));
+    reader.addEventListener('error', () => reject(reader.error || new Error('读取图片失败')));
+    reader.readAsDataURL(blob);
+  });
+
+const imageFilesToHtml = async (files) =>
+  (
+    await Promise.all(
+      files.map(async (file) => `<p><img src="${await blobToDataUrl(file)}" alt="${escapeAttribute(file.name || 'clipboard image')}"></p>`),
+    )
+  ).join('');
+
+const sendClipboardFiles = async (files) => {
+  const peerIds = [...state.peers.keys()];
+  if (!files.length) return;
+  if (!peerIds.length) {
+    showToast('请先发现一台设备。');
+    return;
+  }
+  for (const peerId of peerIds) {
+    for (const file of files) await sendFileObject(file, peerId);
+  }
+  showToast(files.length === 1 ? '已发送粘贴文件。' : `已发送 ${files.length} 个粘贴文件。`);
+};
+
+const syncClipboard = ({ silent = false } = {}) => {
+  const payload = clipboardPayload();
+  if (!hasClipboardPayload(payload)) {
+    dom.clipboardState.textContent = '自动同步';
+    return;
+  }
+  if (shareClipboardWithAll()) {
+    dom.clipboardState.textContent = '已同步';
+    if (!silent) showToast('剪贴板已同步。');
+  } else {
+    dom.clipboardState.textContent = '等待连接';
+  }
+};
+
+const scheduleClipboardSync = () => {
+  clearTimeout(state.clipboardTimer);
+  dom.clipboardState.textContent = state.peers.size ? '正在同步...' : '等待连接';
+  state.clipboardTimer = setTimeout(() => syncClipboard({ silent: true }), 450);
+};
+
+const focusClipboardInput = () => {
+  dom.clipboardText.focus();
+};
+
+const selectClipboardContent = () => {
+  focusClipboardInput();
+  const range = document.createRange();
+  range.selectNodeContents(dom.clipboardText);
+  const selection = getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+};
+
+const insertClipboardContent = ({ text = '', html = '' }) => {
+  focusClipboardInput();
+  document.execCommand(html ? 'insertHTML' : 'insertText', false, html ? sanitizeHtml(html) : text);
+};
+
+const pastedFiles = (dataTransfer) =>
+  Array.from(dataTransfer?.items || [])
+    .filter((item) => item.kind === 'file')
+    .map((item, index) => namedClipboardFile(item.getAsFile(), index))
+    .filter(Boolean);
+
+const handleClipboardPaste = async (event) => {
+  const data = event.clipboardData;
+  if (!data) return;
+  const files = pastedFiles(data);
+  const imageFiles = files.filter((file) => file.type.startsWith('image/'));
+  const otherFiles = files.filter((file) => !file.type.startsWith('image/'));
+  const html = data.getData('text/html');
+  const text = data.getData('text/plain');
+  if (!html && !files.length) return;
+  event.preventDefault();
+  const imageHtml = await imageFilesToHtml(imageFiles);
+  if (html || text || imageHtml) {
+    insertClipboardContent({ html: `${html}${imageHtml}`, text });
+    scheduleClipboardSync();
+  }
+  if (otherFiles.length) sendClipboardFiles(otherFiles).catch((error) => showToast(`发送粘贴文件失败：${error.message}`));
+};
+
+const readRichClipboard = async () => {
+  const payload = { text: '', html: '' };
+  const files = [];
+  for (const item of await navigator.clipboard.read()) {
+    for (const type of item.types) {
+      const blob = await item.getType(type);
+      if (type === 'text/html' && !payload.html) payload.html = await blob.text();
+      else if (type === 'text/plain' && !payload.text) payload.text = await blob.text();
+      else if (type.startsWith('image/')) payload.html += await imageFilesToHtml([namedClipboardFile(blob, files.length)]);
+      else if (!type.startsWith('text/')) files.push(namedClipboardFile(blob, files.length));
+    }
+  }
+  return { payload, files };
+};
+
+const readAndPushClipboard = async () => {
+  if (!navigator.clipboard?.readText && !navigator.clipboard?.read) {
+    focusClipboardInput();
+    showToast(window.isSecureContext ? '当前浏览器不允许网页读取剪贴板，请直接粘贴。' : '当前地址不是安全上下文，Edge 会禁止读取剪贴板，请直接粘贴。');
+    return;
+  }
+  try {
+    if (navigator.clipboard.read) {
+      const { payload, files } = await readRichClipboard();
+      if (hasClipboardPayload(payload)) {
+        renderClipboardPayload(payload);
+        syncClipboard({ silent: false });
+      }
+      if (files.length) await sendClipboardFiles(files);
+      if (!hasClipboardPayload(payload) && !files.length) showToast('剪贴板没有可读取的内容。');
+      return;
+    }
+    renderClipboardPayload({ text: await navigator.clipboard.readText() });
+    syncClipboard({ silent: false });
+  } catch (error) {
+    focusClipboardInput();
+    showToast(`读取剪贴板失败：${error.message || '请直接粘贴。'}`);
+  }
+};
+
+const writeClipboardContent = async ({ text = '', html = '' }) => {
+  const cleanHtml = sanitizeHtml(html);
+  if (cleanHtml && navigator.clipboard?.write && globalThis.ClipboardItem) {
+    try {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          'text/html': new Blob([cleanHtml], { type: 'text/html' }),
+          'text/plain': new Blob([text], { type: 'text/plain' }),
+        }),
+      ]);
+      return;
+    } catch {
+      /* fall back to text or selection copy */
+    }
+  }
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  selectClipboardContent();
+  if (!document.execCommand('copy')) throw new Error('当前浏览器不支持复制');
+};
+
+const copyClipboard = async () => {
+  const payload = clipboardPayload();
+  if (!hasClipboardPayload(payload)) {
+    showToast('没有可复制的内容。');
+    return;
+  }
+  try {
+    await writeClipboardContent(payload);
+    showToast('已复制到本机剪贴板。');
+  } catch (error) {
+    showToast(`复制失败：${error.message}`);
+  }
+};
+
+const handleJsonMessage = (peerId, { type, payload = {} }) => {
   switch (type) {
-    case 'welcome': {
-      state.selfId = payload.id;
-      dom.selfId.textContent = payload.id;
-      if (!state.displayName && payload.displayName) {
-        state.displayName = payload.displayName;
-        dom.currentDisplayName.textContent = payload.displayName;
-        dom.displayName.value = payload.displayName;
-        persistDisplayName(payload.displayName);
-      }
-      if (
-        state.displayName &&
-        payload.displayName &&
-        payload.displayName !== state.displayName &&
-        !state.hasSentInitialRegister
-      ) {
-        sendWsMessage('register', { displayName: state.displayName });
-        state.hasSentInitialRegister = true;
-      }
-      if (payload.peers) {
-        payload.peers.forEach((peer) => {
-          state.peers.set(peer.id, peer);
-        });
-        renderPeers();
-      }
-      setServerStatus(`已注册 · ${formatClock()}`);
-      break;
-    }
-    case 'peer-joined':
-    case 'peer-updated': {
-      state.peers.set(payload.id, payload);
+    case 'hello':
+      state.peers.set(peerId, { ...(state.peers.get(peerId) || { id: peerId }), name: payload.name, platform: payload.platform });
       renderPeers();
       break;
-    }
-    case 'peer-left': {
-      state.peers.delete(payload.id);
-      cleanupPeer(payload.id, { reason: 'peer-left' });
-      renderPeers();
+    case 'text-message':
       break;
-    }
-    case 'register': {
+    case 'clipboard':
+      renderClipboardPayload(payload);
+      dom.clipboardState.textContent = '收到剪贴板';
+      writeClipboardContent(payload).catch(() => {});
+      showToast('收到剪贴板内容。');
       break;
-    }
-    case 'registered': {
-      if (payload.displayName) {
-        state.displayName = payload.displayName;
-        if (dom.displayName) {
-          dom.displayName.value = payload.displayName;
-        }
-        if (dom.currentDisplayName) {
-          dom.currentDisplayName.textContent = payload.displayName;
-        }
-        persistDisplayName(payload.displayName);
-        state.hasSentInitialRegister = true;
-      }
+    case 'rtc-offer':
+      acceptRtcOffer(peerId, payload.description).catch(() => closeRtc(peerId));
       break;
-    }
-    case 'signal': {
-      const { from, data: signalData } = payload;
-      if (!signalData) break;
-      if (signalData.type === 'offer') {
-        await acceptOffer(from, signalData.sdp);
-      } else if (signalData.type === 'answer') {
-        await acceptAnswer(from, signalData.sdp);
-      } else if (signalData.type === 'candidate') {
-        await addIceCandidate(from, signalData.candidate);
-      }
+    case 'rtc-answer':
+      acceptRtcAnswer(peerId, payload.description).catch(() => closeRtc(peerId));
       break;
-    }
-    case 'text-message': {
-      addMessage(payload);
+    case 'rtc-candidate':
+      acceptRtcCandidate(peerId, payload.candidate).catch(() => {});
       break;
-    }
-    case 'clipboard-update': {
-      const descriptor = normalizeClipboardDescriptor(payload);
-      const textContent = extractPlainText(descriptor, '');
-      if (typeof descriptor.content !== 'string') {
-        descriptor.content = textContent;
-      }
-      dom.clipboardText.value = textContent;
-      state.lastClipboardPayload = descriptor;
-      state.clipboardTextLinkedPayload = descriptor;
-      const hint = clipboardFormatHint(descriptor);
-      appendStatus(
-        dom.clipboardStatus,
-        `收到 ${payload.displayName || payload.from} 的剪贴板内容${hint}。`,
-      );
-      if (navigator.clipboard) {
-        requestClipboardWrite(descriptor);
-      }
+    case 'file-meta':
+      receiveFileMeta(peerId, payload);
       break;
-    }
-    case 'poke': {
+    case 'file-chunk-meta':
+      state.pendingRtcChunks.set(peerId, payload);
       break;
-    }
-    case 'large-file-meta': {
-      const { from, transferId, name, size, mime } = payload;
-      if (!from || !transferId) {
-        break;
-      }
-      const key = relayKey(transferId);
-      const display = createTransferDisplay({
-        direction: 'inbound',
-        peerId: from,
-        name,
-        size,
-      });
-      state.incomingTransfers.set(key, {
-        meta: { id: transferId, name, size, mime },
-        receivedBytes: 0,
-        display,
-        peerId: from,
-        mode: 'http-relay',
-      });
-      updateTransferDisplay(display, {
-        percent: 0,
-        status: `等待 ${peerLabel(from)} 上传到本机服务器…`,
-      });
-      appendStatus(
-        dom.fileStatus,
-        `${peerLabel(from)} 正在发送 "${name || '文件'}"（${humanFileSize(size)}），服务器将先落盘校验。`,
-      );
+    case 'file-chunk':
+      receiveFileChunk(peerId, payload);
       break;
-    }
-    case 'large-file-progress': {
-      const { transferId, receivedBytes, size, percent } = payload;
-      if (!transferId) {
-        break;
-      }
-      const key = relayKey(transferId);
-      const transfer = state.incomingTransfers.get(key);
-      if (!transfer) {
-        break;
-      }
-      transfer.receivedBytes = receivedBytes || transfer.receivedBytes || 0;
-      const resolvedPercent =
-        typeof percent === 'number'
-          ? percent
-          : size
-          ? Math.min(100, Math.round((transfer.receivedBytes / size) * 100))
-          : 0;
-      updateTransferDisplay(transfer.display, {
-        percent: resolvedPercent,
-        status: `发送方上传并校验分片 ${resolvedPercent}%`,
-      });
+    case 'file-complete':
+      completeFile(peerId, payload);
       break;
-    }
-    case 'large-file-ready': {
-      const { from, transferId, name, size, mime, sha256, downloadUrl } = payload;
-      if (!transferId || !downloadUrl) {
-        break;
-      }
-      const key = relayKey(transferId);
-      let transfer = state.incomingTransfers.get(key);
-      if (!transfer) {
-        const display = createTransferDisplay({
-          direction: 'inbound',
-          peerId: from,
-          name,
-          size,
-        });
-        transfer = {
-          meta: { id: transferId, name, size, mime },
-          receivedBytes: size || 0,
-          display,
-          peerId: from,
-          mode: 'http-relay',
-        };
-        state.incomingTransfers.set(key, transfer);
-      }
-      transfer.meta.sha256 = sha256;
-      transfer.meta.downloadUrl = downloadUrl;
-      if (transfer.display?.meta) {
-        transfer.display.meta.textContent = `${humanFileSize(size)} · SHA-256 ${shortHash(sha256)}`;
-      }
-      completeTransferDisplay(
-        transfer.display,
-        `服务器校验完成，可下载 "${name || transfer.meta.name || '文件'}"`,
-      );
-      appendDownloadActions(transfer.display, payload);
-      appendStatus(
-        dom.fileStatus,
-        `文件 "${name || transfer.meta.name || '文件'}" 已通过 SHA-256 校验：${shortHash(sha256)}。`,
-      );
-      triggerDownloadUrl(downloadUrl, name || transfer.meta.name || '接收文件');
-      state.incomingTransfers.delete(key);
+    case 'file-ack':
+      handleFileAck(payload);
       break;
-    }
-    case 'large-file-error': {
-      const { transferId, message: errorMessage, from } = payload;
-      if (transferId) {
-        const key = relayKey(transferId);
-        const transfer = state.incomingTransfers.get(key);
-        if (transfer?.display) {
-          failTransferDisplay(transfer.display, errorMessage || '大文件传输失败。');
-        }
-        if (transfer) {
-          state.incomingTransfers.delete(key);
-        }
-        const trackerInfo = state.transferTrackers.get(transferId);
-        if (trackerInfo) {
-          trackerInfo.tracker.cancelled = true;
-          trackerInfo.tracker.cancelledReason = errorMessage || '大文件传输失败。';
-          state.transferTrackers.delete(transferId);
-        }
-      }
-      appendStatus(
-        dom.fileStatus,
-        `大文件传输失败：${peerLabel(from || payload?.targetId || '未知设备')} · ${errorMessage || '请稍后重试。'}`,
-      );
-      break;
-    }
-    case 'file-transfer-meta': {
-      const { from, transferId, name, size, mime } = payload;
-      if (!from || !transferId) {
-        break;
-      }
-      const key = relayKey(transferId);
-      const display = createTransferDisplay({
-        direction: 'inbound',
-        peerId: from,
-        name,
-        size,
-      });
-      state.incomingTransfers.set(key, {
-        meta: { id: transferId, name, size, mime },
-        chunks: [],
-        receivedBytes: 0,
-        display,
-        peerId: from,
-        mode: 'relay',
-      });
-      updateTransferDisplay(display, {
-        percent: 0,
-        status: `通过服务器接收「${name || '文件'}」…`,
-      });
-      appendStatus(
-        dom.fileStatus,
-        `正在通过服务器接收来自 ${peerLabel(from)} 的 "${name || '文件'}"（${humanFileSize(size)}）`,
-      );
-      break;
-    }
-    case 'file-transfer-chunk': {
-      const { transferId, data: base64, size: totalSize } = payload;
-      if (!transferId || typeof base64 !== 'string') {
-        break;
-      }
-      const key = relayKey(transferId);
-      const transfer = state.incomingTransfers.get(key);
-      if (!transfer) {
-        break;
-      }
-      const chunk = base64ToUint8Array(base64);
-      transfer.chunks.push(chunk);
-      transfer.receivedBytes += chunk.byteLength;
-      const expectedSize = transfer.meta.size || totalSize || 0;
-      const percent = expectedSize
-        ? Math.min(100, Math.round((transfer.receivedBytes / expectedSize) * 100))
-        : 0;
-      if (transfer.display) {
-        updateTransferDisplay(transfer.display, {
-          percent,
-          status: `通过服务器接收 ${percent}%`,
-        });
-      }
-      break;
-    }
-    case 'file-transfer-complete': {
-      const { transferId, name: friendlyName, mime } = payload;
-      if (!transferId) {
-        break;
-      }
-      const key = relayKey(transferId);
-      const transfer = state.incomingTransfers.get(key);
-      if (!transfer) {
-        break;
-      }
-      const blob = new Blob(transfer.chunks, {
-        type: mime || transfer.meta.mime || 'application/octet-stream',
-      });
-      const filename = friendlyName || transfer.meta.name || '接收文件';
-      const downloadUrl = triggerDownload(blob, filename);
-      const link = document.createElement('a');
-      link.href = downloadUrl;
-      link.download = filename;
-      link.textContent = `重新下载 ${filename}`;
-      link.className = 'download-link';
-      link.rel = 'noopener';
-      const actions = document.createElement('div');
-      actions.className = 'transfer-actions';
-      actions.appendChild(link);
-      if (transfer.display) {
-        completeTransferDisplay(
-          transfer.display,
-          `已通过服务器接收完成 "${filename}"，正在保存…`,
-        );
-        transfer.display.entry.appendChild(actions);
-        updateStatusPanelScroll(dom.fileStatus);
-      } else if (dom.fileStatus) {
-        dom.fileStatus.appendChild(actions);
-        updateStatusPanelScroll(dom.fileStatus);
-      }
-      appendStatus(dom.fileStatus, `文件 "${filename}" 已保存并可再次下载。`);
-      state.incomingTransfers.delete(key);
-      setTimeout(() => {
-        URL.revokeObjectURL(downloadUrl);
-        if (link.isConnected) {
-          link.textContent = `${filename} 下载链接已过期`;
-          link.removeAttribute('href');
-          link.classList.add('download-link-disabled');
-        }
-      }, 5 * 60 * 1000);
-      break;
-    }
-    case 'file-transfer-error': {
-      const { transferId, message: errorMessage, from } = payload;
-      if (!transferId) {
-        break;
-      }
-      const key = relayKey(transferId);
-      const transfer = state.incomingTransfers.get(key);
-      let handled = false;
-      if (transfer?.display) {
-        failTransferDisplay(
-          transfer.display,
-          `服务器中转失败：${errorMessage || '对方已取消'}`,
-        );
-        handled = true;
-      }
-      if (transfer) {
-        state.incomingTransfers.delete(key);
-      }
-      const trackerInfo = state.transferTrackers.get(transferId);
-      if (trackerInfo) {
-        trackerInfo.tracker.cancelled = true;
-        trackerInfo.tracker.cancelledReason =
-          errorMessage || '对方取消了接收。';
-        state.transferTrackers.delete(transferId);
-        handled = true;
-      }
-      const peerName = peerLabel(from || trackerInfo?.peerId || '未知设备');
-      appendStatus(
-        dom.fileStatus,
-        `通过服务器的文件传输失败：${peerName} · ${errorMessage || '请稍后再试。'}`,
-      );
-      break;
-    }
-    case 'ping': {
-      sendWsMessage('pong', { timestamp: Date.now() });
-      break;
-    }
-    case 'error': {
-      appendStatus(dom.fileStatus, `服务器错误：${payload.message}`);
-      break;
-    }
     default:
       break;
   }
 };
 
-const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-const wsUrl = `${protocol}//${location.host}`;
-
-const resetPeerState = () => {
-  const peerIds = Array.from(state.peerConnections.keys());
-  peerIds.forEach((peerId) => {
-    cleanupPeer(peerId, { reason: 'reset' });
-  });
-  state.peers.clear();
-  renderPeers();
-};
-
-const failAllTransfers = (message) => {
-  const reason = message || '传输已终止。';
-  for (const transfer of state.incomingTransfers.values()) {
-    if (transfer.display) {
-      failTransferDisplay(transfer.display, reason);
-    }
-  }
-  state.incomingTransfers.clear();
-
-  for (const transfer of state.outgoingTransfers.values()) {
-    if (transfer.display) {
-      failTransferDisplay(transfer.display, reason);
-    }
-  }
-  state.outgoingTransfers.clear();
-
-  for (const { tracker } of state.transferTrackers.values()) {
-    if (tracker) {
-      tracker.cancelled = true;
-      tracker.cancelledReason = reason;
-      if (tracker.display) {
-        failTransferDisplay(tracker.display, reason);
-      }
-    }
-  }
-  state.transferTrackers.clear();
-};
-
-function clearReconnectTimer() {
-  if (state.wsReconnectTimer) {
-    clearTimeout(state.wsReconnectTimer);
-    state.wsReconnectTimer = null;
-  }
-}
-
-function scheduleReconnect() {
-  if (state.wsReconnectTimer) return;
-  const attempt = Math.max(0, state.wsReconnectAttempts);
-  const delay = Math.min(WS_RECONNECT_BASE_DELAY * 2 ** attempt, WS_RECONNECT_MAX_DELAY);
-  state.wsReconnectTimer = setTimeout(() => {
-    state.wsReconnectTimer = null;
-    connectWebSocket();
-  }, delay);
-  state.wsReconnectAttempts += 1;
-}
-
-function connectWebSocket() {
-  const existing = state.ws;
-  if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) {
-    return;
-  }
-
-  clearReconnectTimer();
-
-  const reconnecting = state.wsReconnectAttempts > 0 || Boolean(existing);
-  if (reconnecting) {
-    appendStatus(dom.fileStatus, '正在尝试重新连接发现服务器...');
-  }
-  setServerStatus(`连接中 · ${formatClock()}`);
-
-  try {
-    if (existing && existing.readyState === WebSocket.OPEN) {
-      existing.close();
-    }
-  } catch {
-    /* ignored */
-  }
-
-  const socket = new WebSocket(wsUrl);
-  state.ws = socket;
-
-  const handleOpen = () => {
-    if (state.ws !== socket) return;
-    state.wsReconnectAttempts = 0;
-    clearReconnectTimer();
-    appendStatus(dom.fileStatus, '已连接到发现服务器。');
-    setServerStatus(`已连接 · ${formatClock()}`);
-    const name = state.displayName || loadDisplayName();
-    if (name) {
-      state.displayName = name;
-      if (dom.displayName) {
-        dom.displayName.value = name;
-      }
-      if (dom.currentDisplayName) {
-        dom.currentDisplayName.textContent = name;
-      }
-      sendWsMessage('register', { displayName: name });
-      state.hasSentInitialRegister = true;
-    } else {
-      state.hasSentInitialRegister = false;
-    }
-  };
-
-  const handleClose = () => {
-    if (state.ws !== socket) return;
-    state.ws = null;
-    appendStatus(dom.fileStatus, '与服务器的连接已断开。');
-    setServerStatus(`已断开 · ${formatClock()}`);
-    state.hasSentInitialRegister = false;
-    resetPeerState();
-    failAllTransfers('服务器连接已断开。');
-    scheduleReconnect();
-  };
-
-  const handleError = () => {
-    if (state.ws !== socket) return;
-    appendStatus(dom.fileStatus, 'WebSocket 连接出现错误。');
-    setServerStatus(`连接异常 · ${formatClock()}`);
-  };
-
-  socket.addEventListener('open', handleOpen);
-  socket.addEventListener('message', handleSocketMessage);
-  socket.addEventListener('close', handleClose);
-  socket.addEventListener('error', handleError);
-}
-
-const ensureWebSocket = () => {
-  const socket = state.ws;
-  if (!socket || socket.readyState === WebSocket.CLOSED) {
-    connectWebSocket();
-  }
-};
-
-document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) {
-    state.wsReconnectAttempts = 0;
-    ensureWebSocket();
-  }
+dom.fileInput.addEventListener('change', () => {
+  if (!dom.fileInput.files?.[0]) return;
+  sendFile().catch((error) => showToast(`发送失败：${error.message}`));
+});
+dom.pinButton.addEventListener('click', openPinDialog);
+dom.pinDialog.addEventListener('close', () => {
+  if (dom.pinDialog.returnValue === 'save') savePin(dom.pinInput.value);
+});
+dom.qrToggle.addEventListener('click', () => {
+  state.addressMode = state.addressMode === 'mdns' && state.addresses.ip ? 'ip' : 'mdns';
+  updateAddressDisplay();
+});
+dom.clipboardText.addEventListener('input', scheduleClipboardSync);
+dom.clipboardText.addEventListener('paste', (event) => {
+  handleClipboardPaste(event).catch((error) => showToast(`粘贴失败：${error.message}`));
+});
+dom.readClipboardBtn.addEventListener('click', readAndPushClipboard);
+dom.copyClipboardBtn.addEventListener('click', copyClipboard);
+dom.themeToggle.addEventListener('click', () => {
+  applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
 });
 
-window.addEventListener('online', () => {
-  appendStatus(dom.fileStatus, '网络已恢复，正在重新连接服务器。');
-  state.wsReconnectAttempts = 0;
-  ensureWebSocket();
-});
-
-window.addEventListener('offline', () => {
-  appendStatus(dom.fileStatus, '网络已断开，等待恢复后将自动重连。');
-  setServerStatus(`离线 · ${formatClock()}`);
-  clearReconnectTimer();
-  state.wsReconnectAttempts = 0;
-});
-
-setServerStatus('正在连接...');
-appendStatus(dom.fileStatus, '页面已刷新，开始初始化连接。');
-connectWebSocket();
-
-if (!('RTCPeerConnection' in window)) {
-  appendStatus(dom.fileStatus, '此浏览器不支持 WebRTC。');
-  dom.sendFileBtn.disabled = true;
-}
-
-if (!navigator.clipboard) {
-  appendStatus(
-    dom.clipboardStatus,
-    '当前环境不支持剪贴板 API，请手动粘贴并复制内容。',
-  );
-} else {
-  if (typeof navigator.clipboard.read !== 'function' || typeof ClipboardItem === 'undefined') {
-    appendStatus(
-      dom.clipboardStatus,
-      '本浏览器暂不支持读取富文本剪贴板，仅能同步纯文本内容。',
-    );
-  }
-  if (typeof navigator.clipboard.readText !== 'function') {
-    appendStatus(
-      dom.clipboardStatus,
-      '此浏览器可能阻止读取剪贴板，如遇失败请手动粘贴后再分享。',
-    );
-  }
-  if (typeof navigator.clipboard.write !== 'function' || typeof ClipboardItem === 'undefined') {
-    appendStatus(
-      dom.clipboardStatus,
-      '本浏览器暂不支持写入富文本剪贴板，自动复制时将退回纯文本。',
-    );
-  }
-  if (typeof navigator.clipboard.writeText !== 'function') {
-    appendStatus(
-      dom.clipboardStatus,
-      '此浏览器可能阻止写入剪贴板，若自动复制失败请手动复制。',
-    );
-  }
-}
+updateTransferUi();
+loadAddresses();
+connectDiscovery();
