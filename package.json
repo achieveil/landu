@@ -3,6 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "description": "Landu client with LAN signaling and WebRTC transfer.",
+  "license": "MIT",
   "main": "index.js",
   "type": "module",
   "scripts": {
