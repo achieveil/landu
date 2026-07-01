@@ -66,9 +66,51 @@ node index.js -p 8080
 
 如果端口配置为 `80`，页面展示的地址会省略端口，例如 `http://landu.local`。
 
+## 二进制包
+
+纯隔离内网环境不需要安装 Node.js 或 npm。先在有网络的构建机上生成二进制文件，再把 `dist/` 里的文件拷贝到内网机器运行。
+
+构建全部 Windows / Linux 产物：
+
+```bash
+npm install
+npm run build:bin
+```
+
+产物说明：
+
+```text
+dist/landu-linux-x64       Linux x64
+dist/landu-linux-arm64     Linux ARM64
+dist/landu-windows-x64.exe Windows x64
+```
+
+只构建当前系统：
+
+```bash
+npm run build:bin:current
+```
+
+Linux 运行：
+
+```bash
+chmod +x landu-linux-x64
+./landu-linux-x64 --port 3000
+```
+
+Windows 运行：
+
+```powershell
+.\landu-windows-x64.exe --port 3000
+```
+
+不需要改端口时，可以直接双击 `landu-windows-x64.exe`，默认监听 `3000`。
+
+启动后终端会输出 `http://landu.local:3000` 和局域网 IP 地址。把对应平台的单个二进制文件拷贝到目标机器即可运行。
+
 ## PM2 部署
 
-PM2 可以把 Landu 作为后台进程运行，并在系统启动后自动恢复。
+PM2 适用于目标机器可以安装 Node.js/npm 的环境。它可以把 Landu 作为后台进程运行，并在系统启动后自动恢复。
 
 ### Linux
 

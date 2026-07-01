@@ -5,8 +5,13 @@
   "description": "Landu client with LAN signaling and WebRTC transfer.",
   "license": "MIT",
   "main": "index.js",
+  "bin": "index.js",
   "type": "module",
   "scripts": {
+    "build:bin": "node scripts/build-binaries.mjs",
+    "build:bin:current": "node scripts/build-binaries.mjs host",
+    "build:bin:linux": "node scripts/build-binaries.mjs node22-linux-x64 node22-linux-arm64",
+    "build:bin:windows": "node scripts/build-binaries.mjs node22-win-x64",
     "start": "node index.js",
     "server": "node index.js",
     "test": "node scripts/self-check.mjs"
@@ -16,5 +21,9 @@
     "multicast-dns": "^7.2.5",
     "qrcode": "^1.5.4",
     "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@yao-pkg/pkg": "^6.21.0",
+    "esbuild": "^0.28.1"
   }
 }

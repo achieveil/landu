@@ -117,7 +117,7 @@ body {
 
 .page {
   width: min(980px, calc(100% - 56px));
-  margin: 32px auto 64px;
+  margin: 32px auto 0;
 }
 
 .identity {
@@ -707,6 +707,7 @@ button.compact {
   .qr-card {
     width: 112px;
     min-height: 128px;
+    justify-self: center;
   }
 
   .qr-card img {
